@@ -38,6 +38,12 @@ python -c "from werkzeug.security import generate_password_hash; print(generate_
 python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('your-strong-password'))"
 ```
 
+**Linux/macOS (bash/zsh)**
+
+```bash
+python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('your-strong-password'))"
+```
+
 Copy the printed hash.
 
 ### 3) Set required environment variables
@@ -59,6 +65,27 @@ python app.py
 set WEBIDE_PASSWORD_HASH=paste-generated-hash-here
 set SECRET_KEY=replace-with-a-long-random-secret
 python app.py
+```
+
+**Linux/macOS (bash/zsh)**
+
+```bash
+export WEBIDE_PASSWORD_HASH='paste-generated-hash-here'
+export SECRET_KEY='replace-with-a-long-random-secret'
+python app.py
+```
+
+If you use a `.env` file on Linux/macOS:
+
+- Keep the hash on a single line.
+- Do not wrap the value in extra quotes that become part of the value.
+- Use LF endings (not CRLF).
+
+Example:
+
+```env
+WEBIDE_PASSWORD_HASH=pbkdf2:sha256:600000$...$...
+SECRET_KEY=replace-with-a-long-random-secret
 ```
 
 Optional for HTTPS deployments:

@@ -2,6 +2,7 @@
 <html>
 <head>
 <title>Web IDE</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
 
 <script src="https://unpkg.com/monaco-editor@0.55.1/min/vs/loader.js"></script>
 
@@ -397,6 +398,7 @@ body { display:flex; }
     <div class="toolbar">
         <button class="icon-btn" id="new-file-btn" onclick="createItem('file')" title="New File" aria-label="New File"></button>
         <button class="icon-btn" id="new-folder-btn" onclick="createItem('folder')" title="New Folder" aria-label="New Folder"></button>
+        <button class="icon-btn" id="logout-btn" onclick="logout()" title="Logout" aria-label="Logout">⎋</button>
     </div>
     <input id="search" placeholder="Search files...">
     <div id="tree"></div>
@@ -942,6 +944,10 @@ async function requestJson(url, options={}){
     }
 
     if(!response.ok){
+        if(response.status === 401){
+            window.location.href = "/login";
+            throw new Error("Authentication required");
+        }
         const message = data.error || `Request failed (${response.status})`;
         throw new Error(message);
     }
@@ -1230,6 +1236,16 @@ async function save(){
     } catch (error) {
         setStatus(`Save failed: ${error.message}`, true);
     }
+}
+
+async function logout(){
+    try {
+        await requestJson("/auth/logout", {
+            method: "POST",
+            headers: { 'Content-Type': 'application/json' }
+        });
+    } catch {}
+    window.location.href = "/login";
 }
 
 function updateStatus(){

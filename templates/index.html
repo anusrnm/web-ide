@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Monaco IDE</title>
+
+<script src="https://unpkg.com/monaco-editor@0.55.1/min/vs/loader.js"></script>
+
+<style>
+body { margin:0; display:flex; height:100vh; font-family:sans-serif; }
+
+#explorer {
+    width:280px;
+    min-width:180px;
+    max-width:600px;
+    background:#1e1e1e;
+    color:#ccc;
+    overflow:auto;
+    padding:8px;
+}
+
+#divider {
+    width:5px;
+    cursor:col-resize;
+    background:#333;
+}
+
+#main { flex:1; display:flex; flex-direction:column; }
+
+#tabs { display:flex; background:#2d2d2d; }
+
+.tab {
+    padding:6px 12px;
+    border-right:1px solid #444;
+    cursor:pointer;
+}
+
+.tab.active { background:#1e1e1e; }
+
+.close { margin-left:6px; color:#ff5555; cursor:pointer; }
+
+#editor { flex:1; }
+
+#statusbar {
+    height:24px;
+    background:#007acc;
+    color:white;
+    font-size:12px;
+    padding:4px 10px;
+}
+
+/* Explorer */
+.tree-item {
+    cursor:pointer;
+    user-select:none;
+    padding:2px 4px;
+}
+
+.tree-item:hover { background:#2a2a2a; }
+
+.folder::before { content:"📂 "; }
+.folder.closed::before { content:"📁 "; }
+.file::before { content:"📄 "; }
+
+.toolbar {
+    display:flex;
+    gap:8px;
+    margin-bottom:8px;
+}
+
+.icon-btn {
+    cursor:pointer;
+    font-size:18px;
+}
+</style>
+</head>
+<body>
+
+<div id="explorer">
+
+    <div class="toolbar">
+        <span class="icon-btn" onclick="createItem('file')" title="New File">📄➕</span>
+        <span class="icon-btn" onclick="createItem('folder')" title="New Folder">📁➕</span>
+    </div>
+
+    <input id="search" placeholder="Search..." style="width:100%;margin-bottom:6px;">
+    <div id="tree"></div>
+
+</div>
+
+<div id="divider"></div>
+
+<div id="main">
+    <div id="tabs"></div>
+    <div id="editor"></div>
+    <div id="statusbar">Ready</div>
+</div>
+
+<script>
+require.config({
+    paths:{'vs':'https://unpkg.com/monaco-editor@0.55.1/min/vs'}
+});
+
+let editor;
+let models = {};
+let currentFile = null;
+
+require(['vs/editor/editor.main'], function(){
+
+    editor = monaco.editor.create(document.getElementById('editor'), {
+        theme:'vs-dark',
+        automaticLayout:true
+    });
+
+    editor.onDidChangeCursorPosition(updateStatus);
+
+    window.addEventListener("keydown", e=>{
+        if(e.ctrlKey && e.key==="s"){
+            e.preventDefault();
+            save();
+        }
+    });
+
+    loadTree();
+});
+
+function detectLanguage(file){
+    const ext = file.split('.').pop().toLowerCase();
+    const map = {
+        py:"python",
+        js:"javascript",
+        ts:"typescript",
+        html:"html",
+        css:"css",
+        json:"json",
+        md:"markdown",
+        cpp:"cpp",
+        c:"c",
+        java:"java",
+        go:"go",
+        rs:"rust",
+        php:"php",
+        sh:"shell",
+        yml:"yaml",
+        yaml:"yaml"
+    };
+    return map[ext] || "plaintext";
+}
+
+function loadTree(){
+    fetch("/tree")
+    .then(r=>r.json())
+    .then(data=>{
+        document.getElementById("tree").innerHTML = buildTree(data);
+        attachTreeHandlers();
+    });
+}
+
+function buildTree(nodes){
+    let html="<ul>";
+    for(let n of nodes){
+        if(n.type==="folder"){
+            html+=`
+            <li>
+                <div class="tree-item folder closed" data-path="${n.path}">
+                    ${n.name}
+                </div>
+                <div style="display:none;margin-left:15px;">
+                    ${buildTree(n.children)}
+                </div>
+            </li>`;
+        } else {
+            html+=`
+            <li>
+                <div class="tree-item file" data-path="${n.path}">
+                    ${n.name}
+                </div>
+            </li>`;
+        }
+    }
+    html+="</ul>";
+    return html;
+}
+
+function attachTreeHandlers(){
+
+    document.querySelectorAll(".folder").forEach(folder=>{
+        folder.onclick = function(){
+            const next = this.nextElementSibling;
+            const isClosed = this.classList.contains("closed");
+
+            this.classList.toggle("closed");
+            next.style.display = isClosed ? "block" : "none";
+        };
+    });
+
+    document.querySelectorAll(".file").forEach(file=>{
+        file.onclick = function(){
+            openFile(this.dataset.path);
+        };
+
+        file.oncontextmenu = function(e){
+            e.preventDefault();
+            showContextMenu(this.dataset.path);
+        };
+    });
+}
+
+function openFile(path){
+
+    if(models[path]){
+        setActive(path);
+        return;
+    }
+
+    fetch("/open",{
+        method:"POST",
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({path})
+    })
+    .then(r=>r.json())
+    .then(data=>{
+        models[path] = monaco.editor.createModel(
+            data.content,
+            detectLanguage(path)
+        );
+        createTab(path);
+        setActive(path);
+    });
+}
+
+function createTab(path){
+
+    const tab=document.createElement("div");
+    tab.className="tab";
+    tab.dataset.path=path;
+    tab.innerHTML=`${path.split('/').pop()} <span class="close">×</span>`;
+
+    tab.onclick=()=>setActive(path);
+
+    tab.querySelector(".close").onclick=(e)=>{
+        e.stopPropagation();
+        closeTab(path);
+    };
+
+    document.getElementById("tabs").appendChild(tab);
+}
+
+function setActive(path){
+    currentFile=path;
+    editor.setModel(models[path]);
+
+    document.querySelectorAll(".tab").forEach(t=>{
+        t.classList.toggle("active", t.dataset.path===path);
+    });
+
+    updateStatus();
+}
+
+function closeTab(path){
+    models[path].dispose();
+    delete models[path];
+    document.querySelector(`.tab[data-path="${path}"]`).remove();
+    editor.setModel(null);
+    currentFile=null;
+}
+
+function save(){
+    if(!currentFile) return;
+
+    fetch("/save",{
+        method:"POST",
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+            path:currentFile,
+            content:editor.getValue()
+        })
+    });
+}
+
+function updateStatus(){
+    if(!currentFile) return;
+    const p=editor.getPosition();
+    document.getElementById("statusbar").innerText =
+        `${currentFile} | Ln ${p.lineNumber}, Col ${p.column}`;
+}
+
+function createItem(type){
+    const name=prompt("Name:");
+    if(!name) return;
+
+    fetch("/create",{
+        method:"POST",
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({path:name,type:type})
+    }).then(loadTree);
+}
+
+function showContextMenu(path){
+    const action=prompt("rename / delete ?");
+    if(action==="rename"){
+        const newName=prompt("New name:");
+        fetch("/rename",{
+            method:"POST",
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({
+                old:path,
+                new:path.split('/').slice(0,-1).concat(newName).join('/')
+            })
+        }).then(loadTree);
+    }
+    if(action==="delete"){
+        fetch("/delete",{
+            method:"POST",
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({path})
+        }).then(loadTree);
+    }
+}
+
+/* SEARCH */
+document.getElementById("search").addEventListener("input",function(){
+    const q=this.value.toLowerCase();
+    document.querySelectorAll(".file").forEach(el=>{
+        el.parentElement.style.display =
+            el.textContent.toLowerCase().includes(q) ? "block" : "none";
+    });
+});
+
+/* RESIZER */
+document.getElementById("divider").addEventListener("mousedown",function(){
+    document.onmousemove=function(e){
+        document.getElementById("explorer").style.width=e.clientX+"px";
+    };
+    document.onmouseup=function(){
+        document.onmousemove=null;
+    };
+});
+</script>
+</body>
+</html>

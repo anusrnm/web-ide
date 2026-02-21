@@ -12,7 +12,13 @@ app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "0") == "1"
 
-AUTH_PASSWORD_HASH = os.getenv("WEBIDE_PASSWORD_HASH", "")
+AUTH_PASSWORD_HASH = (os.getenv("WEBIDE_PASSWORD_HASH") or "").strip().replace("\r", "").replace("\n", "")
+
+if AUTH_PASSWORD_HASH and "$" not in AUTH_PASSWORD_HASH:
+    raise RuntimeError(
+        "WEBIDE_PASSWORD_HASH appears invalid. Ensure the full Werkzeug hash is set "
+        "without truncation, extra quoting, or shell expansion."
+    )
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 

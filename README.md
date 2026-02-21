@@ -1,5 +1,39 @@
 # Web IDE
 
+## ROOT_DIR parameter
+
+The `ROOT_DIR` parameter sets the root directory for file operations (tree, open, save, create, rename, delete). By default, it uses the project directory, but you can override it:
+
+- **Environment variable:**
+	- `ROOT_DIR=/path/to/your/content`
+- **Command line argument:**
+	- `python app.py --root /path/to/your/content`
+
+**Example .env file:**
+```env
+ROOT_DIR=/home/pi/web-content
+```
+
+**Example PowerShell:**
+```powershell
+$env:ROOT_DIR = "/path/to/your/content"
+python app.py
+```
+
+**Example cmd.exe:**
+```bat
+set ROOT_DIR=/path/to/your/content
+python app.py
+```
+
+**Example bash/zsh:**
+```bash
+export ROOT_DIR="/path/to/your/content"
+python app.py
+```
+
+If not set, the app defaults to the project directory.
+
 ## Authentication setup (no user database)
 
 This app uses a single shared password with Flask session cookies.
@@ -93,3 +127,42 @@ Optional for HTTPS deployments:
 - `SESSION_COOKIE_SECURE=1`
 
 Then open `http://localhost:5000` and sign in with your shared password.
+## Running as a Service on Raspberry Pi Boot
+
+To run Web IDE automatically at boot, use `systemd` for robust service management:
+
+1. Create a unit file `/etc/systemd/system/webide.service`:
+	```ini
+	[Unit]
+	Description=Web IDE Service
+	After=network.target
+
+	[Service]
+	User=pi
+	WorkingDirectory=/home/pi/web-ide
+	Environment="WEBIDE_PASSWORD_HASH=..." "SECRET_KEY=..." "ROOT_DIR=/home/pi/web-content"
+	ExecStart=/usr/bin/python3 app.py
+	Restart=always
+
+	[Install]
+	WantedBy=multi-user.target
+	```
+2. Reload systemd:
+	```bash
+	sudo systemctl daemon-reload
+	```
+3. Enable the service:
+	```bash
+	sudo systemctl enable webide
+	```
+4. Start the service:
+	```bash
+	sudo systemctl start webide
+	```
+
+**Notes:**
+- Update `WorkingDirectory` and environment variables as needed.
+- Logs are managed by systemd (view with `journalctl -u webide`).
+- For HTTPS, set `SESSION_COOKIE_SECURE=1` in the unit file.
+
+**Alternative:** You can use `/etc/rc.local` to start the app, but `systemd` is recommended for reliability.

@@ -1,5 +1,7 @@
 import os
 import shutil
+import argparse
+import sys
 from urllib.parse import urlparse
 from flask import Flask, render_template, request, jsonify, redirect, session, url_for
 from werkzeug.exceptions import HTTPException
@@ -21,6 +23,11 @@ if AUTH_PASSWORD_HASH and "$" not in AUTH_PASSWORD_HASH:
     )
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+
+# Configurable content root: CLI `--root` (when run as a script) overrides
+# `ROOT_DIR` env var; otherwise fallback to the directory of this file.
+ROOT_DIR = os.getenv("ROOT_DIR") or BASE_DIR
+ROOT_DIR = os.path.abspath(os.path.normpath(ROOT_DIR))
 
 
 def is_api_request():
@@ -74,14 +81,14 @@ def normalize_client_path(path):
 
 def safe_path(path):
     rel_path = normalize_client_path(path)
-    full = os.path.abspath(os.path.join(BASE_DIR, rel_path))
+    full = os.path.abspath(os.path.join(ROOT_DIR, rel_path))
 
     try:
-        common = os.path.commonpath([BASE_DIR, full])
+        common = os.path.commonpath([ROOT_DIR, full])
     except ValueError as exc:
         raise ValueError("Invalid path") from exc
 
-    if common != BASE_DIR:
+    if common != ROOT_DIR:
         raise ValueError("Invalid path")
 
     return full
@@ -102,7 +109,7 @@ def build_tree(root):
     tree = []
     for item in sorted(os.listdir(root)):
         path = os.path.join(root, item)
-        rel = os.path.relpath(path, BASE_DIR).replace("\\", "/")
+        rel = os.path.relpath(path, ROOT_DIR).replace("\\", "/")
 
         if os.path.isdir(path):
             tree.append({
@@ -164,7 +171,7 @@ def index():
 
 @app.route("/tree")
 def tree():
-    return jsonify(build_tree(BASE_DIR))
+    return jsonify(build_tree(ROOT_DIR))
 
 @app.route("/open", methods=["POST"])
 def open_file():
@@ -249,6 +256,13 @@ def handle_unexpected_error(error):
     return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run web-ide app")
+    parser.add_argument("--root", help="Override the content root directory")
+    args = parser.parse_args()
+
+    if args.root:
+        ROOT_DIR = os.path.abspath(os.path.normpath(args.root))
+
     debug_enabled = os.getenv("FLASK_DEBUG", "0") == "1"
     app.run(
         host=os.getenv("HOST", "0.0.0.0"),

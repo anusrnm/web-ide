@@ -159,7 +159,7 @@ def handle_unexpected_error(error):
 if __name__ == "__main__":
     debug_enabled = os.getenv("FLASK_DEBUG", "0") == "1"
     app.run(
-        host=os.getenv("HOST", "127.0.0.1"),
+        host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "5000")),
         debug=debug_enabled,
     )

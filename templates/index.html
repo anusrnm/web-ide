@@ -6,85 +6,276 @@
 <script src="https://unpkg.com/monaco-editor@0.55.1/min/vs/loader.js"></script>
 
 <style>
-body { margin:0; display:flex; height:100vh; font-family:sans-serif; }
+* { box-sizing:border-box; }
+
+html, body {
+    margin:0;
+    height:100%;
+    overflow:hidden;
+    font-family:Segoe UI, Roboto, Arial, sans-serif;
+    background:#1e1e1e;
+    color:#d4d4d4;
+}
+
+body { display:flex; }
 
 #explorer {
     width:280px;
     min-width:180px;
     max-width:600px;
-    background:#1e1e1e;
-    color:#ccc;
-    overflow:auto;
-    padding:8px;
+    background:#181818;
+    color:#cfcfcf;
+    border-right:1px solid #2f2f2f;
+    overflow:hidden;
+    padding:10px;
+    display:flex;
+    flex-direction:column;
+    gap:8px;
 }
 
 #divider {
-    width:5px;
+    width:6px;
     cursor:col-resize;
-    background:#333;
+    background:#252525;
 }
 
-#main { flex:1; display:flex; flex-direction:column; }
+#main {
+    flex:1;
+    display:flex;
+    flex-direction:column;
+    min-width:0;
+    min-height:0;
+    overflow:hidden;
+}
 
-#tabs { display:flex; background:#2d2d2d; }
+#tabs {
+    display:flex;
+    background:#252526;
+    border-bottom:1px solid #333;
+    overflow-x:auto;
+    overflow-y:hidden;
+    white-space:nowrap;
+    min-height:34px;
+    flex-shrink:0;
+}
 
 .tab {
-    padding:6px 12px;
-    border-right:1px solid #444;
+    padding:7px 10px;
+    border-right:1px solid #343434;
     cursor:pointer;
+    color:#c9c9c9;
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    max-width:260px;
+    min-width:110px;
+    font-size:12px;
 }
 
-.tab.active { background:#1e1e1e; }
+.tab-label {
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+}
 
-.close { margin-left:6px; color:#ff5555; cursor:pointer; }
+.tab:hover { background:#2d2d30; }
 
-#editor { flex:1; }
+.tab.active {
+    background:#1e1e1e;
+    color:#ffffff;
+}
+
+.tab.dirty .tab-label::after {
+    content:" •";
+    color:#4fc1ff;
+}
+
+.close {
+    color:#d0d0d0;
+    cursor:pointer;
+    font-size:13px;
+}
+
+.close:hover { color:#ff7b72; }
+
+#editor {
+    flex:1;
+    min-height:0;
+}
 
 #statusbar {
-    height:24px;
+    height:22px;
     background:#007acc;
     color:white;
-    font-size:12px;
-    padding:4px 10px;
+    font-size:11px;
+    padding:0 10px;
+    display:flex;
+    align-items:center;
+    line-height:22px;
+    flex-shrink:0;
+    overflow:hidden;
+    white-space:nowrap;
+    text-overflow:ellipsis;
+    border-top:1px solid rgba(255,255,255,0.16);
 }
 
-/* Explorer */
-.tree-item {
-    cursor:pointer;
-    user-select:none;
-    padding:2px 4px;
+.explorer-title {
+    font-size:11px;
+    text-transform:uppercase;
+    letter-spacing:.08em;
+    color:#9d9d9d;
+    margin:0;
 }
-
-.tree-item:hover { background:#2a2a2a; }
-
-.folder::before { content:"📂 "; }
-.folder.closed::before { content:"📁 "; }
-.file::before { content:"📄 "; }
 
 .toolbar {
     display:flex;
     gap:8px;
-    margin-bottom:8px;
+    margin:0;
 }
 
 .icon-btn {
     cursor:pointer;
-    font-size:18px;
+    width:28px;
+    height:28px;
+    border-radius:6px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:#232323;
+    border:1px solid #333;
+    color:#dadada;
+}
+
+.icon-btn:hover { background:#2d2d2d; }
+
+.icon-btn svg {
+    width:16px;
+    height:16px;
+}
+
+#search {
+    width:100%;
+    margin:0;
+    border:1px solid #3d3d3d;
+    background:#111;
+    color:#e5e5e5;
+    border-radius:6px;
+    padding:6px 8px;
+    outline:none;
+    font-size:12px;
+}
+
+#search:focus {
+    border-color:#007acc;
+}
+
+#tree {
+    flex:1;
+    overflow:auto;
+    min-height:0;
+    padding-right:4px;
+}
+
+#tree ul {
+    list-style:none;
+    margin:0;
+    padding-left:14px;
+}
+
+#tree > ul { padding-left:0; }
+
+.tree-item {
+    cursor:pointer;
+    user-select:none;
+    padding:4px 8px;
+    border-radius:6px;
+    display:flex;
+    align-items:center;
+    gap:6px;
+    font-size:12px;
+}
+
+.tree-item:hover { background:#2a2a2a; }
+
+.tree-item.selected {
+    background:#094771;
+    color:#ffffff;
+}
+
+.tree-caret {
+    color:#a7a7a7;
+    width:12px;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    flex-shrink:0;
+}
+
+.tree-icon {
+    width:14px;
+    height:14px;
+    display:inline-flex;
+    flex-shrink:0;
+}
+
+.tree-label {
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+}
+
+.tree-item.folder .tree-icon svg { color:#dcb67a; }
+.tree-item.file .tree-icon svg { color:#7fb3ff; }
+
+.tree-item.selected .tree-caret,
+.tree-item.selected .tree-icon svg { color:#ffffff; }
+
+.context-menu {
+    position:fixed;
+    z-index:2000;
+    display:none;
+    min-width:170px;
+    background:#252526;
+    border:1px solid #3a3a3a;
+    border-radius:6px;
+    box-shadow:0 8px 24px rgba(0,0,0,.35);
+    padding:4px;
+}
+
+.context-item {
+    width:100%;
+    border:none;
+    background:transparent;
+    color:#d4d4d4;
+    text-align:left;
+    font-size:12px;
+    padding:6px 8px;
+    border-radius:4px;
+    cursor:pointer;
+}
+
+.context-item:hover {
+    background:#094771;
+    color:#ffffff;
+}
+
+.context-separator {
+    height:1px;
+    background:#3a3a3a;
+    margin:4px 2px;
 }
 </style>
 </head>
 <body>
 
 <div id="explorer">
-
+    <p class="explorer-title">Explorer</p>
     <div class="toolbar">
-        <span class="icon-btn" onclick="createItem('file')" title="New File">📄➕</span>
-        <span class="icon-btn" onclick="createItem('folder')" title="New Folder">📁➕</span>
+        <button class="icon-btn" id="new-file-btn" onclick="createItem('file')" title="New File" aria-label="New File"></button>
+        <button class="icon-btn" id="new-folder-btn" onclick="createItem('folder')" title="New Folder" aria-label="New Folder"></button>
     </div>
-
-    <input id="search" placeholder="Search..." style="width:100%;margin-bottom:6px;">
+    <input id="search" placeholder="Search files...">
     <div id="tree"></div>
-
 </div>
 
 <div id="divider"></div>
@@ -95,6 +286,8 @@ body { margin:0; display:flex; height:100vh; font-family:sans-serif; }
     <div id="statusbar">Ready</div>
 </div>
 
+<div id="explorer-context-menu" class="context-menu"></div>
+
 <script>
 require.config({
     paths:{'vs':'https://unpkg.com/monaco-editor@0.55.1/min/vs'}
@@ -102,10 +295,79 @@ require.config({
 
 let editor;
 let models = {};
+let modelListeners = {};
+let dirtyFiles = {};
 let currentFile = null;
+let selectedTreePath = null;
+let menuTarget = null;
+
+function createIcon(name){
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "1.4");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+
+    const addPath = (d) => {
+        const path = document.createElementNS(ns, "path");
+        path.setAttribute("d", d);
+        svg.appendChild(path);
+    };
+
+    if(name === "file"){
+        addPath("M4.5 2.2h4L11 4.7v8H4.5z");
+        addPath("M8.5 2.2v2.5H11");
+    } else if(name === "folder"){
+        addPath("M1.8 4.5h4l1.3 1.4h7.1v6.6H1.8z");
+    } else if(name === "filePlus"){
+        addPath("M4.5 2.2h4L11 4.7v8H4.5z");
+        addPath("M8.5 2.2v2.5H11");
+        addPath("M6.3 9.2h2.8");
+        addPath("M7.7 7.8v2.8");
+    } else if(name === "folderPlus"){
+        addPath("M1.8 4.5h4l1.3 1.4h7.1v6.6H1.8z");
+        addPath("M8 7.8v3");
+        addPath("M6.5 9.3h3");
+    } else if(name === "chevronRight"){
+        addPath("M6 4.2l3.8 3.8L6 11.8");
+    } else if(name === "chevronDown"){
+        addPath("M4.2 6l3.8 3.8L11.8 6");
+    }
+
+    return svg;
+}
+
+function setIcon(container, iconName){
+    container.innerHTML = "";
+    container.appendChild(createIcon(iconName));
+}
+
+function initToolbarIcons(){
+    const newFile = document.getElementById("new-file-btn");
+    const newFolder = document.getElementById("new-folder-btn");
+    if(newFile) setIcon(newFile, "filePlus");
+    if(newFolder) setIcon(newFolder, "folderPlus");
+}
+
+function initContextMenu(){
+    document.addEventListener("click", hideContextMenu);
+    document.addEventListener("keydown", (event)=>{
+        if(event.key === "Escape") hideContextMenu();
+    });
+
+    const tree = document.getElementById("tree");
+    tree.addEventListener("contextmenu", (event)=>{
+        const item = event.target.closest(".tree-item");
+        if(item) return;
+        event.preventDefault();
+        openContextMenu(event.clientX, event.clientY, { type: "root", path: "" });
+    });
+}
 
 require(['vs/editor/editor.main'], function(){
-
     editor = monaco.editor.create(document.getElementById('editor'), {
         theme:'vs-dark',
         automaticLayout:true
@@ -122,6 +384,130 @@ require(['vs/editor/editor.main'], function(){
 
     loadTree();
 });
+
+initToolbarIcons();
+initContextMenu();
+
+function basename(path){
+    return path.split('/').pop() || path;
+}
+
+function dirname(path){
+    const idx = path.lastIndexOf('/');
+    return idx === -1 ? "" : path.slice(0, idx);
+}
+
+function joinPath(parent, name){
+    return parent ? `${parent}/${name}` : name;
+}
+
+function getTabElement(path){
+    return Array.from(document.querySelectorAll(".tab"))
+        .find(t => t.dataset.path === path) || null;
+}
+
+function setStatus(message, isError=false){
+    const status = document.getElementById("statusbar");
+    status.innerText = message;
+    status.style.background = isError ? "#b42318" : "#007acc";
+}
+
+function normalizePath(path){
+    return String(path || "").replace(/\\/g, '/');
+}
+
+function setTreeSelection(path){
+    selectedTreePath = normalizePath(path);
+    document.querySelectorAll(".tree-item").forEach((el)=>{
+        el.classList.toggle("selected", normalizePath(el.dataset.path) === selectedTreePath);
+    });
+}
+
+function hideContextMenu(){
+    const menu = document.getElementById("explorer-context-menu");
+    menu.style.display = "none";
+    menu.innerHTML = "";
+    menuTarget = null;
+}
+
+function getContextActions(target){
+    if(target.type === "file"){
+        return [
+            { label: "Open", action: ()=>openFile(target.path) },
+            { type: "separator" },
+            { label: "Rename", action: ()=>renamePath(target.path) },
+            { label: "Delete", action: ()=>deletePath(target.path) }
+        ];
+    }
+
+    if(target.type === "folder"){
+        return [
+            { label: "New File", action: ()=>createItem("file", target.path) },
+            { label: "New Folder", action: ()=>createItem("folder", target.path) },
+            { type: "separator" },
+            { label: "Rename", action: ()=>renamePath(target.path) },
+            { label: "Delete", action: ()=>deletePath(target.path) }
+        ];
+    }
+
+    return [
+        { label: "New File", action: ()=>createItem("file") },
+        { label: "New Folder", action: ()=>createItem("folder") },
+        { type: "separator" },
+        { label: "Refresh Explorer", action: ()=>loadTree() }
+    ];
+}
+
+function openContextMenu(x, y, target){
+    menuTarget = target;
+    const menu = document.getElementById("explorer-context-menu");
+    menu.innerHTML = "";
+
+    for(const item of getContextActions(target)){
+        if(item.type === "separator"){
+            const separator = document.createElement("div");
+            separator.className = "context-separator";
+            menu.appendChild(separator);
+            continue;
+        }
+
+        const button = document.createElement("button");
+        button.className = "context-item";
+        button.type = "button";
+        button.textContent = item.label;
+        button.onclick = async (event)=>{
+            event.stopPropagation();
+            hideContextMenu();
+            await item.action();
+        };
+        menu.appendChild(button);
+    }
+
+    menu.style.display = "block";
+    const { innerWidth, innerHeight } = window;
+    const rect = menu.getBoundingClientRect();
+    const left = Math.min(x, innerWidth - rect.width - 6);
+    const top = Math.min(y, innerHeight - rect.height - 6);
+    menu.style.left = `${Math.max(6, left)}px`;
+    menu.style.top = `${Math.max(6, top)}px`;
+}
+
+async function requestJson(url, options={}){
+    const response = await fetch(url, options);
+    let data = {};
+    try {
+        data = await response.json();
+    } catch {
+        data = {};
+    }
+
+    if(!response.ok){
+        const message = data.error || `Request failed (${response.status})`;
+        throw new Error(message);
+    }
+
+    return data;
+}
 
 function detectLanguage(file){
     const ext = file.split('.').pop().toLowerCase();
@@ -146,108 +532,165 @@ function detectLanguage(file){
     return map[ext] || "plaintext";
 }
 
-function loadTree(){
-    fetch("/tree")
-    .then(r=>r.json())
-    .then(data=>{
-        document.getElementById("tree").innerHTML = buildTree(data);
-        attachTreeHandlers();
-    });
+async function loadTree(){
+    try {
+        const data = await requestJson("/tree");
+        const tree = document.getElementById("tree");
+        tree.innerHTML = "";
+        tree.appendChild(buildTree(data));
+        if(selectedTreePath){
+            setTreeSelection(selectedTreePath);
+        }
+    } catch (error) {
+        setStatus(`Tree error: ${error.message}`, true);
+    }
 }
 
 function buildTree(nodes){
-    let html="<ul>";
+    const list = document.createElement("ul");
+
     for(let n of nodes){
-        if(n.type==="folder"){
-            html+=`
-            <li>
-                <div class="tree-item folder closed" data-path="${n.path}">
-                    ${n.name}
-                </div>
-                <div style="display:none;margin-left:15px;">
-                    ${buildTree(n.children)}
-                </div>
-            </li>`;
+        const item = document.createElement("li");
+        const node = document.createElement("div");
+        node.className = `tree-item ${n.type === "folder" ? "folder closed" : "file"}`;
+        node.dataset.path = n.path;
+
+        const caret = document.createElement("span");
+        caret.className = "tree-caret";
+
+        const icon = document.createElement("span");
+        icon.className = "tree-icon";
+
+        const label = document.createElement("span");
+        label.className = "tree-label";
+        label.textContent = n.name;
+
+        if(n.type === "folder"){
+            setIcon(caret, "chevronRight");
+            setIcon(icon, "folder");
         } else {
-            html+=`
-            <li>
-                <div class="tree-item file" data-path="${n.path}">
-                    ${n.name}
-                </div>
-            </li>`;
+            setIcon(icon, "file");
         }
+
+        node.appendChild(caret);
+        node.appendChild(icon);
+        node.appendChild(label);
+
+        if(n.type === "folder"){
+            const childrenContainer = document.createElement("div");
+            childrenContainer.style.display = "none";
+            childrenContainer.style.marginLeft = "8px";
+            childrenContainer.appendChild(buildTree(n.children || []));
+
+            node.onclick = function(){
+                setTreeSelection(this.dataset.path);
+                const isClosed = this.classList.contains("closed");
+                this.classList.toggle("closed");
+                childrenContainer.style.display = isClosed ? "block" : "none";
+                setIcon(caret, isClosed ? "chevronDown" : "chevronRight");
+            };
+
+            node.oncontextmenu = function(event){
+                event.preventDefault();
+                setTreeSelection(this.dataset.path);
+                openContextMenu(event.clientX, event.clientY, {
+                    type: "folder",
+                    path: this.dataset.path
+                });
+            };
+
+            item.appendChild(node);
+            item.appendChild(childrenContainer);
+        } else {
+            node.onclick = function(){
+                setTreeSelection(this.dataset.path);
+                openFile(this.dataset.path);
+            };
+
+            node.oncontextmenu = function(event){
+                event.preventDefault();
+                setTreeSelection(this.dataset.path);
+                openContextMenu(event.clientX, event.clientY, {
+                    type: "file",
+                    path: this.dataset.path
+                });
+            };
+
+            item.appendChild(node);
+        }
+
+        list.appendChild(item);
     }
-    html+="</ul>";
-    return html;
+
+    return list;
 }
 
-function attachTreeHandlers(){
-
-    document.querySelectorAll(".folder").forEach(folder=>{
-        folder.onclick = function(){
-            const next = this.nextElementSibling;
-            const isClosed = this.classList.contains("closed");
-
-            this.classList.toggle("closed");
-            next.style.display = isClosed ? "block" : "none";
-        };
-    });
-
-    document.querySelectorAll(".file").forEach(file=>{
-        file.onclick = function(){
-            openFile(this.dataset.path);
-        };
-
-        file.oncontextmenu = function(e){
-            e.preventDefault();
-            showContextMenu(this.dataset.path);
-        };
-    });
-}
-
-function openFile(path){
+async function openFile(path){
+    path = normalizePath(path);
 
     if(models[path]){
         setActive(path);
         return;
     }
 
-    fetch("/open",{
-        method:"POST",
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({path})
-    })
-    .then(r=>r.json())
-    .then(data=>{
+    try {
+        const data = await requestJson("/open",{
+            method:"POST",
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({path})
+        });
+
         models[path] = monaco.editor.createModel(
             data.content,
             detectLanguage(path)
         );
+
+        modelListeners[path] = models[path].onDidChangeContent(()=>{
+            dirtyFiles[path] = true;
+            updateTabState(path);
+        });
+
+        dirtyFiles[path] = false;
         createTab(path);
         setActive(path);
-    });
+    } catch (error) {
+        setStatus(`Open failed: ${error.message}`, true);
+    }
 }
 
 function createTab(path){
+    const tab = document.createElement("div");
+    tab.className = "tab";
+    tab.dataset.path = path;
 
-    const tab=document.createElement("div");
-    tab.className="tab";
-    tab.dataset.path=path;
-    tab.innerHTML=`${path.split('/').pop()} <span class="close">×</span>`;
+    const label = document.createElement("span");
+    label.className = "tab-label";
+    label.textContent = basename(path);
 
-    tab.onclick=()=>setActive(path);
+    const close = document.createElement("span");
+    close.className = "close";
+    close.textContent = "×";
 
-    tab.querySelector(".close").onclick=(e)=>{
+    tab.appendChild(label);
+    tab.appendChild(close);
+
+    tab.onclick = () => setActive(path);
+
+    close.onclick = (e) => {
         e.stopPropagation();
         closeTab(path);
     };
 
     document.getElementById("tabs").appendChild(tab);
+    updateTabState(path);
 }
 
 function setActive(path){
-    currentFile=path;
+    if(!models[path]) return;
+
+    currentFile = path;
     editor.setModel(models[path]);
+    setTreeSelection(path);
 
     document.querySelectorAll(".tab").forEach(t=>{
         t.classList.toggle("active", t.dataset.path===path);
@@ -256,83 +699,195 @@ function setActive(path){
     updateStatus();
 }
 
-function closeTab(path){
+function closeTab(path, force=false){
+    if(!models[path]) return;
+
+    if(!force && dirtyFiles[path]){
+        const shouldClose = confirm(`Close without saving ${basename(path)}?`);
+        if(!shouldClose) return;
+    }
+
+    if(modelListeners[path]){
+        modelListeners[path].dispose();
+        delete modelListeners[path];
+    }
+
     models[path].dispose();
     delete models[path];
-    document.querySelector(`.tab[data-path="${path}"]`).remove();
-    editor.setModel(null);
-    currentFile=null;
+    delete dirtyFiles[path];
+
+    const tab = getTabElement(path);
+    if(tab) tab.remove();
+
+    if(currentFile === path){
+        const remainingTabs = Array.from(document.querySelectorAll(".tab"));
+        if(remainingTabs.length){
+            setActive(remainingTabs[remainingTabs.length - 1].dataset.path);
+        } else {
+            editor.setModel(null);
+            currentFile = null;
+            setStatus("Ready");
+        }
+    }
 }
 
-function save(){
+function updateTabState(path){
+    const tab = getTabElement(path);
+    if(!tab) return;
+    tab.classList.toggle("dirty", !!dirtyFiles[path]);
+}
+
+async function save(){
     if(!currentFile) return;
 
-    fetch("/save",{
-        method:"POST",
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({
-            path:currentFile,
-            content:editor.getValue()
-        })
-    });
-}
-
-function updateStatus(){
-    if(!currentFile) return;
-    const p=editor.getPosition();
-    document.getElementById("statusbar").innerText =
-        `${currentFile} | Ln ${p.lineNumber}, Col ${p.column}`;
-}
-
-function createItem(type){
-    const name=prompt("Name:");
-    if(!name) return;
-
-    fetch("/create",{
-        method:"POST",
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({path:name,type:type})
-    }).then(loadTree);
-}
-
-function showContextMenu(path){
-    const action=prompt("rename / delete ?");
-    if(action==="rename"){
-        const newName=prompt("New name:");
-        fetch("/rename",{
+    try {
+        await requestJson("/save",{
             method:"POST",
             headers:{'Content-Type':'application/json'},
             body:JSON.stringify({
-                old:path,
-                new:path.split('/').slice(0,-1).concat(newName).join('/')
+                path:currentFile,
+                content:editor.getValue()
             })
-        }).then(loadTree);
-    }
-    if(action==="delete"){
-        fetch("/delete",{
-            method:"POST",
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({path})
-        }).then(loadTree);
+        });
+
+        dirtyFiles[currentFile] = false;
+        updateTabState(currentFile);
+        updateStatus();
+    } catch (error) {
+        setStatus(`Save failed: ${error.message}`, true);
     }
 }
 
-/* SEARCH */
-document.getElementById("search").addEventListener("input",function(){
-    const q=this.value.toLowerCase();
+function updateStatus(){
+    if(!currentFile){
+        setStatus("Ready");
+        return;
+    }
+
+    const p = editor.getPosition();
+    const dirty = dirtyFiles[currentFile] ? " (Unsaved)" : "";
+    setStatus(`${currentFile}${dirty} | Ln ${p.lineNumber}, Col ${p.column}`);
+}
+
+function syncRenamedFileInTabs(oldPath, newPath){
+    const oldPrefix = `${oldPath}/`;
+    const openPaths = Object.keys(models).filter((key)=>
+        key === oldPath || key.startsWith(oldPrefix)
+    );
+
+    for(const sourcePath of openPaths){
+        const targetPath = sourcePath === oldPath
+            ? newPath
+            : `${newPath}${sourcePath.slice(oldPath.length)}`;
+
+        models[targetPath] = models[sourcePath];
+        delete models[sourcePath];
+
+        if(modelListeners[sourcePath]){
+            modelListeners[targetPath] = modelListeners[sourcePath];
+            delete modelListeners[sourcePath];
+        }
+
+        dirtyFiles[targetPath] = dirtyFiles[sourcePath];
+        delete dirtyFiles[sourcePath];
+
+        const tab = getTabElement(sourcePath);
+        if(tab){
+            tab.dataset.path = targetPath;
+            const label = tab.querySelector(".tab-label");
+            if(label) label.textContent = basename(targetPath);
+        }
+
+        if(currentFile === sourcePath){
+            currentFile = targetPath;
+        }
+    }
+}
+
+async function createItem(type, basePath=""){
+    const name = prompt("Name:");
+    if(!name) return;
+
+    const targetPath = normalizePath(joinPath(basePath, name));
+
+    try {
+        await requestJson("/create",{
+            method:"POST",
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({path:targetPath, type:type})
+        });
+        await loadTree();
+        setTreeSelection(targetPath);
+    } catch (error) {
+        setStatus(`Create failed: ${error.message}`, true);
+    }
+}
+
+async function renamePath(path){
+    const newName = prompt("New name:", basename(path));
+    if(!newName) return;
+
+    const target = normalizePath(joinPath(dirname(path), newName));
+
+    try {
+        await requestJson("/rename",{
+            method:"POST",
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({
+                old:normalizePath(path),
+                new:target
+            })
+        });
+
+        syncRenamedFileInTabs(normalizePath(path), target);
+        await loadTree();
+        setTreeSelection(target);
+    } catch (error) {
+        setStatus(`Rename failed: ${error.message}`, true);
+    }
+}
+
+async function deletePath(path){
+    const confirmed = confirm(`Delete ${basename(path)}?`);
+    if(!confirmed) return;
+
+    try {
+        await requestJson("/delete",{
+            method:"POST",
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({path:normalizePath(path)})
+        });
+
+        const targetPrefix = `${path}/`;
+        const affectedTabs = Object.keys(models).filter((key)=>
+            key === path || key.startsWith(targetPrefix)
+        );
+
+        for(const tabPath of affectedTabs){
+            closeTab(tabPath, true);
+        }
+
+        await loadTree();
+        selectedTreePath = null;
+    } catch (error) {
+        setStatus(`Delete failed: ${error.message}`, true);
+    }
+}
+
+document.getElementById("search").addEventListener("input", function(){
+    const query = this.value.toLowerCase();
     document.querySelectorAll(".file").forEach(el=>{
         el.parentElement.style.display =
-            el.textContent.toLowerCase().includes(q) ? "block" : "none";
+            el.textContent.toLowerCase().includes(query) ? "block" : "none";
     });
 });
 
-/* RESIZER */
-document.getElementById("divider").addEventListener("mousedown",function(){
-    document.onmousemove=function(e){
-        document.getElementById("explorer").style.width=e.clientX+"px";
+document.getElementById("divider").addEventListener("mousedown", function(){
+    document.onmousemove = function(e){
+        document.getElementById("explorer").style.width = e.clientX + "px";
     };
-    document.onmouseup=function(){
-        document.onmousemove=null;
+    document.onmouseup = function(){
+        document.onmousemove = null;
     };
 });
 </script>

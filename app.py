@@ -1,11 +1,58 @@
 import os
 import shutil
-from flask import Flask, render_template, request, jsonify
+from urllib.parse import urlparse
+from flask import Flask, render_template, request, jsonify, redirect, session, url_for
 from werkzeug.exceptions import HTTPException
+from werkzeug.security import check_password_hash
 
 app = Flask(__name__)
 
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY") or os.getenv("WEBIDE_SECRET_KEY") or "dev-insecure-secret"
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "0") == "1"
+
+AUTH_PASSWORD_HASH = os.getenv("WEBIDE_PASSWORD_HASH", "")
+
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+
+
+def is_api_request():
+    if request.path.startswith("/auth/"):
+        return True
+    if request.path in {"/tree", "/open", "/save", "/create", "/rename", "/delete"}:
+        return True
+    if request.path.startswith("/api/"):
+        return True
+    accept = request.headers.get("Accept", "")
+    return "application/json" in accept
+
+
+def is_safe_redirect(target):
+    if not target:
+        return False
+    parsed = urlparse(target)
+    return parsed.scheme == "" and parsed.netloc == "" and target.startswith("/")
+
+
+def get_next_path(default="/"):
+    next_path = request.args.get("next") or request.form.get("next") or default
+    return next_path if is_safe_redirect(next_path) else default
+
+
+@app.before_request
+def require_authentication():
+    endpoint = request.endpoint
+    if endpoint in {"login", "static"}:
+        return None
+
+    if session.get("authenticated"):
+        return None
+
+    if is_api_request():
+        return jsonify({"error": "Authentication required"}), 401
+
+    return redirect(url_for("login", next=request.path))
 
 def normalize_client_path(path):
     if not isinstance(path, str) or not path.strip():
@@ -65,6 +112,45 @@ def build_tree(root):
                 "path": rel
             })
     return tree
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not AUTH_PASSWORD_HASH:
+        return (
+            "WEBIDE_PASSWORD_HASH is not configured. "
+            "Set it to a werkzeug password hash before starting the app.",
+            500,
+        )
+
+    if session.get("authenticated"):
+        return redirect(get_next_path("/"))
+
+    if request.method == "GET":
+        return render_template("login.html", error=None, next_path=get_next_path("/"))
+
+    if request.is_json:
+        payload = request.get_json(silent=True) or {}
+        password = (payload.get("password") or "").strip()
+    else:
+        password = request.form.get("password", "").strip()
+
+    if check_password_hash(AUTH_PASSWORD_HASH, password):
+        session["authenticated"] = True
+        if request.is_json:
+            return jsonify({"status": "ok", "redirect": get_next_path("/")})
+        return redirect(get_next_path("/"))
+
+    if request.is_json:
+        return jsonify({"error": "Invalid password"}), 401
+
+    return render_template("login.html", error="Invalid password", next_path=get_next_path("/")), 401
+
+
+@app.route("/auth/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return jsonify({"status": "logged_out"})
 
 @app.route("/")
 def index():

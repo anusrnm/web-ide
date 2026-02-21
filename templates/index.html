@@ -264,6 +264,82 @@ body { display:flex; }
     background:#3a3a3a;
     margin:4px 2px;
 }
+
+.inline-input {
+    border:1px solid #007acc;
+    background:#111;
+    color:#e5e5e5;
+    border-radius:4px;
+    padding:3px 6px;
+    font-size:12px;
+    outline:none;
+    font-family:Segoe UI, Roboto, Arial, sans-serif;
+}
+
+#command-palette {
+    position:fixed;
+    z-index:3000;
+    display:none;
+    top:0;
+    left:0;
+    right:0;
+    bottom:0;
+    background:rgba(0,0,0,0.6);
+    align-items:flex-start;
+    justify-content:center;
+    padding-top:10vh;
+}
+
+.palette-box {
+    min-width:500px;
+    max-width:600px;
+    background:#252526;
+    border:1px solid #3a3a3a;
+    border-radius:8px;
+    box-shadow:0 16px 32px rgba(0,0,0,.5);
+    overflow:hidden;
+    max-height:70vh;
+    display:flex;
+    flex-direction:column;
+}
+
+.palette-input {
+    padding:10px 12px;
+    border:none;
+    background:#1e1e1e;
+    color:#e5e5e5;
+    font-size:13px;
+    outline:none;
+    border-bottom:1px solid #3a3a3a;
+    font-family:Segoe UI, Roboto, Arial, sans-serif;
+}
+
+.palette-items {
+    flex:1;
+    overflow-y:auto;
+    min-height:0;
+}
+
+.palette-item {
+    padding:7px 12px;
+    cursor:pointer;
+    color:#d4d4d4;
+    font-size:12px;
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+}
+
+.palette-item:hover,
+.palette-item.highlighted {
+    background:#094771;
+    color:#ffffff;
+}
+
+.palette-hint {
+    color:#888;
+    font-size:11px;
+}
 </style>
 </head>
 <body>
@@ -288,6 +364,13 @@ body { display:flex; }
 
 <div id="explorer-context-menu" class="context-menu"></div>
 
+<div id="command-palette">
+    <div class="palette-box">
+        <input id="palette-input" class="palette-input" type="text" placeholder="Type command name...">
+        <div id="palette-items" class="palette-items"></div>
+    </div>
+</div>
+
 <script>
 require.config({
     paths:{'vs':'https://unpkg.com/monaco-editor@0.55.1/min/vs'}
@@ -300,6 +383,42 @@ let dirtyFiles = {};
 let currentFile = null;
 let selectedTreePath = null;
 let menuTarget = null;
+let closedTabs = [];
+let recentFiles = [];
+let inlineEditState = null;
+let pendingInlineEdit = false;
+
+const MAX_RECENT = 12;
+const STORAGE_KEY = "ide_recentFiles";
+
+function loadRecentFiles(){
+    try {
+        const stored = localStorage.getItem(STORAGE_KEY);
+        recentFiles = stored ? JSON.parse(stored) : [];
+    } catch {
+        recentFiles = [];
+    }
+}
+
+function saveRecentFiles(){
+    try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(recentFiles.slice(0, MAX_RECENT)));
+    } catch {}
+}
+
+function addRecentFile(path){
+    path = normalizePath(path);
+    recentFiles = recentFiles.filter(p => p !== path);
+    recentFiles.unshift(path);
+    if(recentFiles.length > MAX_RECENT) recentFiles.pop();
+    saveRecentFiles();
+}
+
+function removeRecentFile(path){
+    path = normalizePath(path);
+    recentFiles = recentFiles.filter(p => p !== path);
+    saveRecentFiles();
+}
 
 function createIcon(name){
     const ns = "http://www.w3.org/2000/svg";
@@ -388,6 +507,134 @@ require(['vs/editor/editor.main'], function(){
 initToolbarIcons();
 initContextMenu();
 
+function buildCommandRegistry(){
+    const baseActions = {
+        newFile: async ()=> createItem("file"),
+        newFolder: async ()=> createItem("folder"),
+        saveFile: async ()=> save(),
+        saveAll: async ()=> {
+            for(const path of Object.keys(models)){
+                if(dirtyFiles[path]){
+                    currentFile = path;
+                    await save();
+                }
+            }
+            setStatus("All files saved");
+        },
+        reopenClosedTab: async ()=> {
+            if(closedTabs.length){
+                const path = closedTabs.pop();
+                await openFile(path);
+            }
+        },
+        openRecent: async ()=> {
+            if(!recentFiles.length){
+                setStatus("No recent files");
+                return;
+            }
+            showRecentPalette();
+        }
+    };
+
+    const commands = [
+        { id: "newFile", label: "New File", action: baseActions.newFile, keys: "" },
+        { id: "newFolder", label: "New Folder", action: baseActions.newFolder, keys: "" },
+        { id: "saveFile", label: "Save File", action: baseActions.saveFile, keys: "Ctrl+S" },
+        { id: "saveAll", label: "Save All", action: baseActions.saveAll, keys: "Ctrl+Shift+S" },
+        { id: "reopenClosedTab", label: "Reopen Closed Tab", action: baseActions.reopenClosedTab, keys: "Ctrl+Shift+T" },
+        { id: "openRecent", label: "Open Recent File", action: baseActions.openRecent, keys: "" }
+    ];
+
+    return { commands, actions: baseActions };
+}
+
+const commandRegistry = buildCommandRegistry();
+
+function showCommandPalette(){
+    const palette = document.getElementById("command-palette");
+    const input = document.getElementById("palette-input");
+    const items = document.getElementById("palette-items");
+
+    palette.style.display = "flex";
+    input.value = "";
+    input.focus();
+    populatePaletteItems(commandRegistry.commands, items);
+}
+
+function hideCommandPalette(){
+    document.getElementById("command-palette").style.display = "none";
+}
+
+function populatePaletteItems(commands, container, filter=""){
+    container.innerHTML = "";
+    const filtered = filter
+        ? commands.filter(cmd => cmd.label.toLowerCase().includes(filter.toLowerCase()))
+        : commands;
+
+    for(const cmd of filtered){
+        const item = document.createElement("div");
+        item.className = "palette-item";
+        item.dataset.id = cmd.id;
+
+        const label = document.createElement("span");
+        label.textContent = cmd.label;
+
+        const hint = document.createElement("span");
+        hint.className = "palette-hint";
+        hint.textContent = cmd.keys || "";
+
+        item.appendChild(label);
+        item.appendChild(hint);
+
+        item.onclick = async ()=>{
+            const action = commandRegistry.commands.find(c => c.id === cmd.id)?.action;
+            if(action){
+                hideCommandPalette();
+                await action();
+            }
+        };
+
+        container.appendChild(item);
+    }
+
+    if(!filtered.length){
+        const msg = document.createElement("div");
+        msg.style.cssText = "padding:12px;color:#888;text-align:center;";
+        msg.textContent = "No commands found";
+        container.appendChild(msg);
+    }
+}
+
+function showRecentPalette(){
+    const palette = document.getElementById("command-palette");
+    const input = document.getElementById("palette-input");
+    const items = document.getElementById("palette-items");
+
+    palette.style.display = "flex";
+    input.value = "(recent files)";
+    input.focus();
+
+    items.innerHTML = "";
+    if(!recentFiles.length){
+        const msg = document.createElement("div");
+        msg.style.cssText = "padding:12px;color:#888;";
+        msg.textContent = "No recent files";
+        items.appendChild(msg);
+        return;
+    }
+
+    for(const path of recentFiles){
+        const item = document.createElement("div");
+        item.className = "palette-item";
+        item.textContent = path;
+        item.onclick = async ()=>{
+            hideCommandPalette();
+            await openFile(path);
+        };
+        items.appendChild(item);
+    }
+}
+
 function basename(path){
     return path.split('/').pop() || path;
 }
@@ -423,6 +670,85 @@ function setTreeSelection(path){
     });
 }
 
+function cancelInlineEdit(){
+    if(!inlineEditState) return;
+    const input = inlineEditState.input;
+    const originalName = inlineEditState.originalName;
+    const container = inlineEditState.container;
+
+    input.remove();
+    inlineEditState = null;
+    pendingInlineEdit = false;
+
+    const label = document.createElement("span");
+    label.className = "tree-label";
+    label.textContent = originalName;
+    container.appendChild(label);
+}
+
+function startInlineEdit(nodePath, operationType="rename"){
+    if(inlineEditState) cancelInlineEdit();
+
+    const node = document.querySelector(`.tree-item[data-path="${nodePath}"]`);
+    if(!node) return;
+
+    const label = node.querySelector(".tree-label");
+    if(!label) return;
+
+    const originalName = label.textContent;
+    label.remove();
+
+    const input = document.createElement("input");
+    input.className = "inline-input";
+    input.type = "text";
+    input.value = operationType === "rename" ? originalName : "";
+    input.spellcheck = false;
+
+    inlineEditState = {
+        nodePath,
+        operationType,
+        originalName,
+        input,
+        container: node
+    };
+
+    node.appendChild(input);
+    input.focus();
+    if(operationType === "rename") input.select();
+    pendingInlineEdit = true;
+
+    async function commitEdit(newValue){
+        if(!newValue || (operationType === "rename" && newValue === originalName)){
+            cancelInlineEdit();
+            return;
+        }
+
+        input.disabled = true;
+        try {
+            if(operationType === "rename"){
+                await renamePath(nodePath, newValue);
+            } else {
+                const targetPath = normalizePath(joinPath(nodePath, newValue));
+                await createItemWithPath(operationType, targetPath);
+            }
+        } finally {
+            input.disabled = false;
+            cancelInlineEdit();
+        }
+    }
+
+    input.addEventListener("blur", ()=> commitEdit(input.value));
+    input.addEventListener("keydown", (event)=>{
+        if(event.key === "Enter"){
+            event.stopPropagation();
+            commitEdit(input.value);
+        } else if(event.key === "Escape"){
+            event.stopPropagation();
+            cancelInlineEdit();
+        }
+    });
+}
+
 function hideContextMenu(){
     const menu = document.getElementById("explorer-context-menu");
     menu.style.display = "none";
@@ -435,24 +761,24 @@ function getContextActions(target){
         return [
             { label: "Open", action: ()=>openFile(target.path) },
             { type: "separator" },
-            { label: "Rename", action: ()=>renamePath(target.path) },
+            { label: "Rename", action: ()=>startInlineEdit(target.path, "rename") },
             { label: "Delete", action: ()=>deletePath(target.path) }
         ];
     }
 
     if(target.type === "folder"){
         return [
-            { label: "New File", action: ()=>createItem("file", target.path) },
-            { label: "New Folder", action: ()=>createItem("folder", target.path) },
+            { label: "New File", action: ()=>startInlineEdit(target.path, "file") },
+            { label: "New Folder", action: ()=>startInlineEdit(target.path, "folder") },
             { type: "separator" },
-            { label: "Rename", action: ()=>renamePath(target.path) },
+            { label: "Rename", action: ()=>startInlineEdit(target.path, "rename") },
             { label: "Delete", action: ()=>deletePath(target.path) }
         ];
     }
 
     return [
-        { label: "New File", action: ()=>createItem("file") },
-        { label: "New Folder", action: ()=>createItem("folder") },
+        { label: "New File", action: ()=>startInlineEdit("", "file") },
+        { label: "New Folder", action: ()=>startInlineEdit("", "folder") },
         { type: "separator" },
         { label: "Refresh Explorer", action: ()=>loadTree() }
     ];
@@ -653,6 +979,7 @@ async function openFile(path){
         dirtyFiles[path] = false;
         createTab(path);
         setActive(path);
+        addRecentFile(path);
     } catch (error) {
         setStatus(`Open failed: ${error.message}`, true);
     }
@@ -718,6 +1045,9 @@ function closeTab(path, force=false){
 
     const tab = getTabElement(path);
     if(tab) tab.remove();
+
+    closedTabs.push(path);
+    if(closedTabs.length > 20) closedTabs.shift();
 
     if(currentFile === path){
         const remainingTabs = Array.from(document.querySelectorAll(".tab"));
@@ -805,26 +1135,32 @@ function syncRenamedFileInTabs(oldPath, newPath){
 }
 
 async function createItem(type, basePath=""){
-    const name = prompt("Name:");
-    if(!name) return;
+    await startInlineEdit(basePath, type);
+}
 
-    const targetPath = normalizePath(joinPath(basePath, name));
+async function createItemWithPath(type, targetPath){
+    if(!targetPath){
+        setStatus("Invalid path", true);
+        return;
+    }
 
     try {
         await requestJson("/create",{
             method:"POST",
             headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({path:targetPath, type:type})
+            body:JSON.stringify({
+                path:targetPath,
+                type:type
+            })
         });
         await loadTree();
-        setTreeSelection(targetPath);
+        setTreeSelection(normalizePath(targetPath));
     } catch (error) {
         setStatus(`Create failed: ${error.message}`, true);
     }
 }
 
-async function renamePath(path){
-    const newName = prompt("New name:", basename(path));
+async function renamePath(path, newName){
     if(!newName) return;
 
     const target = normalizePath(joinPath(dirname(path), newName));
@@ -880,6 +1216,41 @@ document.getElementById("search").addEventListener("input", function(){
         el.parentElement.style.display =
             el.textContent.toLowerCase().includes(query) ? "block" : "none";
     });
+});
+
+loadRecentFiles();
+
+document.addEventListener("keydown", (event)=>{
+    if(event.ctrlKey && event.shiftKey && event.key === "P"){
+        event.preventDefault();
+        showCommandPalette();
+    } else if(event.ctrlKey && event.shiftKey && event.key === "T"){
+        event.preventDefault();
+        commandRegistry.actions.reopenClosedTab();
+    } else if(event.ctrlKey && event.shiftKey && event.key === "S"){
+        event.preventDefault();
+        commandRegistry.actions.saveAll();
+    }
+});
+
+document.getElementById("command-palette").addEventListener("click", (event)=>{
+    if(event.target.id === "command-palette"){
+        hideCommandPalette();
+    }
+});
+
+document.getElementById("palette-input").addEventListener("input", (event)=>{
+    const filter = event.target.value;
+    const items = document.getElementById("palette-items");
+    populatePaletteItems(commandRegistry.commands, items, filter);
+});
+
+document.addEventListener("keydown", (event)=>{
+    const palette = document.getElementById("command-palette");
+    if(palette.style.display === "flex" && event.key === "Escape"){
+        event.preventDefault();
+        hideCommandPalette();
+    }
 });
 
 document.getElementById("divider").addEventListener("mousedown", function(){

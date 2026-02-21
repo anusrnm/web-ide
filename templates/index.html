@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-<title>Monaco IDE</title>
+<title>Web IDE</title>
 
 <script src="https://unpkg.com/monaco-editor@0.55.1/min/vs/loader.js"></script>
 
@@ -77,6 +77,54 @@ body { display:flex; }
     text-overflow:ellipsis;
     white-space:nowrap;
 }
+
+.pin-icon {
+    width:14px;
+    height:14px;
+    cursor:pointer;
+    flex-shrink:0;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    color:#888;
+    font-size:11px;
+    opacity:0;
+    transition:opacity 0.2s;
+}
+
+.tab:hover .pin-icon {
+    opacity:1;
+}
+
+.pin-icon.pinned {
+    opacity:1;
+    color:#4fc1ff;
+}
+
+.pin-icon:hover { color:#fff; }
+
+#explorer.hidden {
+    display:none;
+}
+
+#divider.explorer-hidden {
+    cursor:default;
+    opacity:0.5;
+}
+
+.toggle-explorer-btn {
+    cursor:pointer;
+    width:14px;
+    height:14px;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    color:#7fb3ff;
+    font-size:10px;
+    margin-right:4px;
+}
+
+.toggle-explorer-btn:hover { color:#fff; }
 
 .tab:hover { background:#2d2d30; }
 
@@ -387,6 +435,8 @@ let closedTabs = [];
 let recentFiles = [];
 let inlineEditState = null;
 let pendingInlineEdit = false;
+let pinnedTabs = {};
+let explorerHidden = false;
 
 const MAX_RECENT = 12;
 const STORAGE_KEY = "ide_recentFiles";
@@ -424,36 +474,29 @@ function createIcon(name){
     const ns = "http://www.w3.org/2000/svg";
     const svg = document.createElementNS(ns, "svg");
     svg.setAttribute("viewBox", "0 0 16 16");
-    svg.setAttribute("fill", "none");
-    svg.setAttribute("stroke", "currentColor");
-    svg.setAttribute("stroke-width", "1.4");
-    svg.setAttribute("stroke-linecap", "round");
-    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("width", "16");
+    svg.setAttribute("height", "16");
+    svg.setAttribute("fill", "currentColor");
 
     const addPath = (d) => {
         const path = document.createElementNS(ns, "path");
         path.setAttribute("d", d);
+        path.setAttribute("fill", "currentColor");
         svg.appendChild(path);
     };
 
     if(name === "file"){
-        addPath("M4.5 2.2h4L11 4.7v8H4.5z");
-        addPath("M8.5 2.2v2.5H11");
+        addPath("M2 2h8v3h4v9H2V2zm2 10h8V7h-3V4H4v8z");
     } else if(name === "folder"){
-        addPath("M1.8 4.5h4l1.3 1.4h7.1v6.6H1.8z");
+        addPath("M2 3h4l2 2h6v8H2V3z");
     } else if(name === "filePlus"){
-        addPath("M4.5 2.2h4L11 4.7v8H4.5z");
-        addPath("M8.5 2.2v2.5H11");
-        addPath("M6.3 9.2h2.8");
-        addPath("M7.7 7.8v2.8");
+        addPath("M2 2h8v3h4v9H2V2zm5 6v2h2v1H7v2h-1v-2H4v-1h2V8h1z");
     } else if(name === "folderPlus"){
-        addPath("M1.8 4.5h4l1.3 1.4h7.1v6.6H1.8z");
-        addPath("M8 7.8v3");
-        addPath("M6.5 9.3h3");
+        addPath("M2 3h4l2 2h6v8H2V3zm6 3v2h2v1H8v2H7v-2H5v-1h2V6h1z");
     } else if(name === "chevronRight"){
-        addPath("M6 4.2l3.8 3.8L6 11.8");
+        addPath("M5.5 3L10 8l-4.5 5V10zm3 5l-3-4.5v9L8.5 8z");
     } else if(name === "chevronDown"){
-        addPath("M4.2 6l3.8 3.8L11.8 6");
+        addPath("M13 5.5l-5 4.5-5-4.5v3l5 4.5 5-4.5v-3z");
     }
 
     return svg;
@@ -533,6 +576,12 @@ function buildCommandRegistry(){
                 return;
             }
             showRecentPalette();
+        },
+        undo: async ()=> {
+            if(editor && editor.hasTextFocus()) editor.trigger('keyboard', 'undo');
+        },
+        redo: async ()=> {
+            if(editor && editor.hasTextFocus()) editor.trigger('keyboard', 'redo');
         }
     };
 
@@ -542,7 +591,9 @@ function buildCommandRegistry(){
         { id: "saveFile", label: "Save File", action: baseActions.saveFile, keys: "Ctrl+S" },
         { id: "saveAll", label: "Save All", action: baseActions.saveAll, keys: "Ctrl+Shift+S" },
         { id: "reopenClosedTab", label: "Reopen Closed Tab", action: baseActions.reopenClosedTab, keys: "Ctrl+Shift+T" },
-        { id: "openRecent", label: "Open Recent File", action: baseActions.openRecent, keys: "" }
+        { id: "openRecent", label: "Open Recent File", action: baseActions.openRecent, keys: "" },
+        { id: "undo", label: "Undo", action: baseActions.undo, keys: "Ctrl+Z" },
+        { id: "redo", label: "Redo", action: baseActions.redo, keys: "Ctrl+Shift+Z" }
     ];
 
     return { commands, actions: baseActions };
@@ -675,21 +726,84 @@ function cancelInlineEdit(){
     const input = inlineEditState.input;
     const originalName = inlineEditState.originalName;
     const container = inlineEditState.container;
+    const isRoot = inlineEditState.isRoot;
 
     input.remove();
     inlineEditState = null;
     pendingInlineEdit = false;
 
-    const label = document.createElement("span");
-    label.className = "tree-label";
-    label.textContent = originalName;
-    container.appendChild(label);
+    if(isRoot){
+        // Remove root-level placeholder
+        if(container.parentNode) container.parentNode.removeChild(container);
+    } else {
+        // Restore label for tree item
+        const label = document.createElement("span");
+        label.className = "tree-label";
+        label.textContent = originalName;
+        container.appendChild(label);
+    }
 }
 
 function startInlineEdit(nodePath, operationType="rename"){
     if(inlineEditState) cancelInlineEdit();
 
-    const node = document.querySelector(`.tree-item[data-path="${nodePath}"]`);
+    let node = null;
+
+    // For root level create, show inline input at top of tree
+    if(nodePath === "" && operationType !== "rename"){
+        const tree = document.getElementById("tree");
+        const placeholder = document.createElement("div");
+        placeholder.style.cssText = "padding:4px 8px;margin-bottom:4px;";
+        
+        const input = document.createElement("input");
+        input.className = "inline-input";
+        input.type = "text";
+        input.placeholder = `New ${operationType} name...`;
+        input.spellcheck = false;
+        
+        placeholder.appendChild(input);
+        tree.insertBefore(placeholder, tree.firstChild);
+        
+        inlineEditState = {
+            nodePath,
+            operationType,
+            originalName: "",
+            input,
+            container: placeholder,
+            isRoot: true
+        };
+        
+        input.focus();
+        pendingInlineEdit = true;
+        
+        async function commitEdit(newValue){
+            if(!newValue){
+                cancelInlineEdit();
+                return;
+            }
+            input.disabled = true;
+            try {
+                await createItemWithPath(operationType, normalizePath(newValue));
+            } finally {
+                input.disabled = false;
+                cancelInlineEdit();
+            }
+        }
+        
+        input.addEventListener("blur", ()=> commitEdit(input.value));
+        input.addEventListener("keydown", (event)=>{
+            if(event.key === "Enter"){
+                event.stopPropagation();
+                commitEdit(input.value);
+            } else if(event.key === "Escape"){
+                event.stopPropagation();
+                cancelInlineEdit();
+            }
+        });
+        return;
+    }
+
+    node = document.querySelector(`.tree-item[data-path="${nodePath}"]`);
     if(!node) return;
 
     const label = node.querySelector(".tree-label");
@@ -994,11 +1108,21 @@ function createTab(path){
     label.className = "tab-label";
     label.textContent = basename(path);
 
+    const pinIcon = document.createElement("span");
+    pinIcon.className = "pin-icon";
+    pinIcon.innerHTML = "📌";
+    pinIcon.title = "Pin tab";
+    pinIcon.onclick = (e) => {
+        e.stopPropagation();
+        togglePinTab(path);
+    };
+
     const close = document.createElement("span");
     close.className = "close";
     close.textContent = "×";
 
     tab.appendChild(label);
+    tab.appendChild(pinIcon);
     tab.appendChild(close);
 
     tab.onclick = () => setActive(path);
@@ -1042,6 +1166,7 @@ function closeTab(path, force=false){
     models[path].dispose();
     delete models[path];
     delete dirtyFiles[path];
+    delete pinnedTabs[path];
 
     const tab = getTabElement(path);
     if(tab) tab.remove();
@@ -1065,6 +1190,25 @@ function updateTabState(path){
     const tab = getTabElement(path);
     if(!tab) return;
     tab.classList.toggle("dirty", !!dirtyFiles[path]);
+    const pinIcon = tab.querySelector(".pin-icon");
+    if(pinIcon) pinIcon.classList.toggle("pinned", !!pinnedTabs[path]);
+}
+
+function togglePinTab(path){
+    pinnedTabs[path] = !pinnedTabs[path];
+    updateTabState(path);
+    reorganizeTabs();
+}
+
+function reorganizeTabs(){
+    const tabs = document.getElementById("tabs");
+    const tabEls = Array.from(tabs.querySelectorAll(".tab"));
+    const pinned = tabEls.filter(t => pinnedTabs[t.dataset.path]);
+    const unpinned = tabEls.filter(t => !pinnedTabs[t.dataset.path]);
+    
+    tabs.innerHTML = "";
+    pinned.forEach(t => tabs.appendChild(t));
+    unpinned.forEach(t => tabs.appendChild(t));
 }
 
 async function save(){
@@ -1135,6 +1279,17 @@ function syncRenamedFileInTabs(oldPath, newPath){
 }
 
 async function createItem(type, basePath=""){
+    // If basePath not provided, use selected tree item or root
+    if(!basePath){
+        if(selectedTreePath){
+            const selected = document.querySelector(`.tree-item[data-path="${selectedTreePath}"]`);
+            if(selected && selected.classList.contains("folder")){
+                basePath = selectedTreePath;
+            } else if(selectedTreePath){
+                basePath = dirname(selectedTreePath);
+            }
+        }
+    }
     await startInlineEdit(basePath, type);
 }
 
@@ -1230,6 +1385,22 @@ document.addEventListener("keydown", (event)=>{
     } else if(event.ctrlKey && event.shiftKey && event.key === "S"){
         event.preventDefault();
         commandRegistry.actions.saveAll();
+    } else if(event.ctrlKey && event.key === "z" && !event.shiftKey){
+        if(editor && editor.hasTextFocus()){
+            event.preventDefault();
+            commandRegistry.actions.undo();
+        }
+    } else if((event.ctrlKey && event.shiftKey && event.key === "Z") || (event.ctrlKey && event.key === "y")){
+        if(editor && editor.hasTextFocus()){
+            event.preventDefault();
+            commandRegistry.actions.redo();
+        }
+    } else if(event.key === "Delete" && !pendingInlineEdit){
+        // Delete selected tree item
+        if(selectedTreePath){
+            event.preventDefault();
+            deletePath(selectedTreePath);
+        }
     }
 });
 
@@ -1255,11 +1426,46 @@ document.addEventListener("keydown", (event)=>{
 
 document.getElementById("divider").addEventListener("mousedown", function(){
     document.onmousemove = function(e){
-        document.getElementById("explorer").style.width = e.clientX + "px";
+        const explorer = document.getElementById("explorer");
+        const newWidth = e.clientX;
+        
+        if(newWidth < 50){
+            // Hide explorer
+            if(!explorerHidden){
+                explorerHidden = true;
+                explorer.classList.add("hidden");
+                document.getElementById("divider").classList.add("explorer-hidden");
+            }
+        } else {
+            // Show explorer
+            if(explorerHidden){
+                explorerHidden = false;
+                explorer.classList.remove("hidden");
+                document.getElementById("divider").classList.remove("explorer-hidden");
+            }
+            explorer.style.width = newWidth + "px";
+        }
     };
     document.onmouseup = function(){
         document.onmousemove = null;
+        
+        // Allow clicking divider to toggle explorer if hidden
+        if(explorerHidden){
+            document.getElementById("divider").style.cursor = "pointer";
+        }
     };
+});
+
+// Click divider to restore explorer when hidden
+document.getElementById("divider").addEventListener("click", function(){
+    if(explorerHidden){
+        explorerHidden = false;
+        const explorer = document.getElementById("explorer");
+        explorer.classList.remove("hidden");
+        document.getElementById("divider").classList.remove("explorer-hidden");
+        explorer.style.width = "280px";
+        this.style.cursor = "col-resize";
+    }
 });
 </script>
 </body>

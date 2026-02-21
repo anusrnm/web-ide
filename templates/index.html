@@ -427,10 +427,16 @@ require.config({
 });
 
 let editor;
+let diffEditor;
 let models = {};
 let modelListeners = {};
 let dirtyFiles = {};
 let currentFile = null;
+let compareMode = false;
+let compareCandidatePath = null;
+let compareOriginalPath = null;
+let compareModifiedPath = null;
+let compareReadOnlyModels = {};
 let selectedTreePath = null;
 let menuTarget = null;
 let closedTabs = [];
@@ -531,6 +537,102 @@ function initContextMenu(){
     });
 }
 
+async function resolveModelForCompare(path){
+    path = normalizePath(path);
+    
+    if(models[path]){
+        return { model: models[path], isReadOnly: false };
+    }
+    
+    try {
+        const data = await requestJson("/open",{
+            method:"POST",
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({path})
+        });
+        
+        const model = monaco.editor.createModel(
+            data.content,
+            detectLanguage(path)
+        );
+        compareReadOnlyModels[path] = model;
+        return { model: model, isReadOnly: true };
+    } catch (error) {
+        throw error;
+    }
+}
+
+function exitCompareMode(){
+    if(!compareMode) return;
+    
+    if(diffEditor){
+        diffEditor.dispose();
+        diffEditor = null;
+    }
+    
+    Object.keys(compareReadOnlyModels).forEach(path => {
+        const model = compareReadOnlyModels[path];
+        if(model) model.dispose();
+    });
+    compareReadOnlyModels = {};
+    
+    compareMode = false;
+    compareCandidatePath = null;
+    compareOriginalPath = null;
+    compareModifiedPath = null;
+    
+    const editorContainer = document.getElementById('editor');
+    editorContainer.innerHTML = '';
+    editor = monaco.editor.create(editorContainer, {
+        theme:'vs-dark',
+        automaticLayout:true
+    });
+    editor.onDidChangeCursorPosition(updateStatus);
+    
+    if(currentFile && models[currentFile]){
+        editor.setModel(models[currentFile]);
+    }
+    
+    setStatus('Compare mode exited');
+}
+
+async function startCompare(originalPath, modifiedPath){
+    try {
+        originalPath = normalizePath(originalPath);
+        modifiedPath = normalizePath(modifiedPath);
+        
+        const origData = await resolveModelForCompare(originalPath);
+        const modData = await resolveModelForCompare(modifiedPath);
+        
+        if(diffEditor) diffEditor.dispose();
+        
+        const editorContainer = document.getElementById('editor');
+        editorContainer.innerHTML = '';
+        
+        diffEditor = monaco.editor.createDiffEditor(editorContainer, {
+            theme:'vs-dark',
+            automaticLayout:true,
+            readOnly:false,
+            originalEditable:false
+        });
+        
+        diffEditor.setModel({
+            original: origData.model,
+            modified: modData.model
+        });
+        
+        compareMode = true;
+        compareOriginalPath = originalPath;
+        compareModifiedPath = modifiedPath;
+        currentFile = null;
+        
+        setStatus(`Comparing: ${basename(originalPath)} ↔ ${basename(modifiedPath)}`);
+    } catch (error) {
+        setStatus(`Compare failed: ${error.message}`, true);
+        exitCompareMode();
+    }
+}
+
 require(['vs/editor/editor.main'], function(){
     editor = monaco.editor.create(document.getElementById('editor'), {
         theme:'vs-dark',
@@ -584,6 +686,32 @@ function buildCommandRegistry(){
         },
         redo: async ()=> {
             if(editor && editor.hasTextFocus()) editor.trigger('keyboard', 'redo');
+        },
+        selectForCompare: async ()=> {
+            if(!currentFile){
+                setStatus("No file open to select for compare", true);
+                return;
+            }
+            compareCandidatePath = currentFile;
+            setStatus(`Selected for compare: ${basename(currentFile)}`);
+        },
+        compareWithSelected: async ()=> {
+            if(!compareCandidatePath){
+                setStatus("No file selected for compare", true);
+                return;
+            }
+            if(!currentFile){
+                setStatus("No file open to compare", true);
+                return;
+            }
+            await startCompare(compareCandidatePath, currentFile);
+        },
+        exitCompare: async ()=> {
+            if(!compareMode){
+                setStatus("Not in compare mode", true);
+                return;
+            }
+            exitCompareMode();
         }
     };
 
@@ -595,7 +723,10 @@ function buildCommandRegistry(){
         { id: "reopenClosedTab", label: "Reopen Closed Tab", action: baseActions.reopenClosedTab, keys: "Ctrl+Shift+T" },
         { id: "openRecent", label: "Open Recent File", action: baseActions.openRecent, keys: "" },
         { id: "undo", label: "Undo", action: baseActions.undo, keys: "Ctrl+Z" },
-        { id: "redo", label: "Redo", action: baseActions.redo, keys: "Ctrl+Shift+Z" }
+        { id: "redo", label: "Redo", action: baseActions.redo, keys: "Ctrl+Shift+Z" },
+        { id: "selectForCompare", label: "Select File for Compare", action: baseActions.selectForCompare, keys: "" },
+        { id: "compareWithSelected", label: "Compare with Selected File", action: baseActions.compareWithSelected, keys: "" },
+        { id: "exitCompare", label: "Exit Compare Mode", action: baseActions.exitCompare, keys: "" }
     ];
 
     return { commands, actions: baseActions };
@@ -876,6 +1007,20 @@ function getContextActions(target){
     if(target.type === "file"){
         return [
             { label: "Open", action: ()=>openFile(target.path) },
+            { type: "separator" },
+            { label: "Select for Compare", action: ()=>{
+                compareCandidatePath = normalizePath(target.path);
+                setStatus(`Selected for compare: ${basename(compareCandidatePath)}`);
+                hideContextMenu();
+            }},
+            { label: "Compare with Selected", action: async ()=>{
+                if(!compareCandidatePath){
+                    setStatus("No file selected for compare", true);
+                    return;
+                }
+                hideContextMenu();
+                await startCompare(compareCandidatePath, target.path);
+            }},
             { type: "separator" },
             { label: "Rename", action: ()=>startInlineEdit(target.path, "rename") },
             { label: "Delete", action: ()=>deletePath(target.path) }
@@ -1180,11 +1325,16 @@ function closeTab(path, force=false){
     closedTabs.push(path);
     if(closedTabs.length > 20) closedTabs.shift();
 
+    if(compareMode && (path === compareOriginalPath || path === compareModifiedPath)){
+        exitCompareMode();
+    }
+
     if(currentFile === path){
         const remainingTabs = Array.from(document.querySelectorAll(".tab"));
         if(remainingTabs.length){
             setActive(remainingTabs[remainingTabs.length - 1].dataset.path);
         } else {
+            if(compareMode) exitCompareMode();
             editor.setModel(null);
             currentFile = null;
             setStatus("Ready");
@@ -1346,6 +1496,10 @@ async function renamePath(path, newName){
             })
         });
 
+        if(compareMode && (normalizePath(path) === compareOriginalPath || normalizePath(path) === compareModifiedPath)){
+            exitCompareMode();
+        }
+
         syncRenamedFileInTabs(normalizePath(path), target);
         await loadTree();
         setTreeSelection(target);
@@ -1372,6 +1526,10 @@ async function deletePath(path){
 
         for(const tabPath of affectedTabs){
             closeTab(tabPath, true);
+        }
+
+        if(compareMode && (normalizePath(path) === compareOriginalPath || normalizePath(path) === compareModifiedPath)){
+            exitCompareMode();
         }
 
         await loadTree();

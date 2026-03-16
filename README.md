@@ -1,5 +1,32 @@
 # Web IDE
 
+## Editor behavior
+
+The web IDE now includes a few editor behaviors that make it closer to a lightweight VS Code workflow:
+
+- Autosave after a short idle delay while you type.
+- Live refresh for open files when they change on disk or in another browser session.
+- Conflict-safe saves: if a file changes remotely while you still have local edits, autosave pauses instead of silently overwriting the newer disk version.
+- Quick Open with `Ctrl+P`.
+- Explorer toggle with `Ctrl+B`.
+- Monaco find in file with `Ctrl+F`.
+
+### Autosave and live refresh
+
+- Edits are saved automatically after roughly 1.5 seconds of typing inactivity.
+- Switching tabs or leaving the browser window can also flush pending autosaves.
+- Open files are polled periodically for remote updates.
+- Clean tabs reload automatically when the file changes on disk.
+- Dirty tabs are marked as conflicted when the file changes on disk. In that state, autosave stops for that file until you either compare, reload, or explicitly overwrite the disk version.
+
+### Conflict behavior
+
+When a file changes on disk after you opened it:
+
+- Autosave will not overwrite the newer disk version.
+- Manual save will prompt you to compare first or explicitly overwrite.
+- Compare mode can be used to inspect the current disk content against your unsaved local changes.
+
 ## ROOT_DIR parameter
 
 The `ROOT_DIR` parameter sets the root directory for file operations (tree, open, save, create, rename, delete). By default, it uses the project directory, but you can override it:

@@ -1,6 +1,7 @@
 import os
 import shutil
 import argparse
+import hashlib
 import sys
 from urllib.parse import urlparse
 from flask import Flask, render_template, request, jsonify, redirect, session, url_for
@@ -22,6 +23,15 @@ if AUTH_PASSWORD_HASH and "$" not in AUTH_PASSWORD_HASH:
         "without truncation, extra quoting, or shell expansion."
     )
 
+# WEBIDE_DISABLE_AUTH=1 bypasses all authentication — for local testing only.
+AUTH_DISABLED = os.getenv("WEBIDE_DISABLE_AUTH", "0").strip() == "1"
+if AUTH_DISABLED:
+    print(
+        "WARNING: Authentication is DISABLED (WEBIDE_DISABLE_AUTH=1). "
+        "Do NOT run with this setting in any shared or production environment.",
+        file=sys.stderr,
+    )
+
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
 # Configurable content root: CLI `--root` (when run as a script) overrides
@@ -29,11 +39,13 @@ BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 ROOT_DIR = os.getenv("ROOT_DIR") or BASE_DIR
 ROOT_DIR = os.path.abspath(os.path.normpath(ROOT_DIR))
 
+API_PATHS = {"/tree", "/open", "/save", "/create", "/rename", "/delete", "/watch"}
+
 
 def is_api_request():
     if request.path.startswith("/auth/"):
         return True
-    if request.path in {"/tree", "/open", "/save", "/create", "/rename", "/delete"}:
+    if request.path in API_PATHS:
         return True
     if request.path.startswith("/api/"):
         return True
@@ -55,6 +67,9 @@ def get_next_path(default="/"):
 
 @app.before_request
 def require_authentication():
+    if AUTH_DISABLED:
+        return None
+
     endpoint = request.endpoint
     if endpoint in {"login", "static"}:
         return None
@@ -127,8 +142,54 @@ def build_tree(root):
     return tree
 
 
+def read_text_file(path):
+    with open(path, "r", encoding="utf-8", errors="ignore") as file_handle:
+        return file_handle.read()
+
+
+def build_file_meta(path):
+    if not os.path.isfile(path):
+        return None
+
+    stat_result = os.stat(path)
+    return {
+        "version": f"{stat_result.st_mtime_ns}:{stat_result.st_size}",
+        "mtimeNs": stat_result.st_mtime_ns,
+        "size": stat_result.st_size,
+    }
+
+
+def build_tree_version():
+    entries = []
+    for current_root, dirnames, filenames in os.walk(ROOT_DIR):
+        dirnames.sort()
+        filenames.sort()
+
+        for dirname in dirnames:
+            rel_path = os.path.relpath(os.path.join(current_root, dirname), ROOT_DIR).replace("\\", "/")
+            entries.append(f"d:{rel_path}")
+
+        for filename in filenames:
+            rel_path = os.path.relpath(os.path.join(current_root, filename), ROOT_DIR).replace("\\", "/")
+            entries.append(f"f:{rel_path}")
+
+    digest = hashlib.sha256("\n".join(entries).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def build_open_file_response(path):
+    return {
+        "content": read_text_file(path),
+        "meta": build_file_meta(path),
+    }
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    if AUTH_DISABLED:
+        session["authenticated"] = True
+        return redirect(get_next_path("/"))
+
     if not AUTH_PASSWORD_HASH:
         return (
             "WEBIDE_PASSWORD_HASH is not configured. "
@@ -171,7 +232,10 @@ def index():
 
 @app.route("/tree")
 def tree():
-    return jsonify(build_tree(ROOT_DIR))
+    return jsonify({
+        "tree": build_tree(ROOT_DIR),
+        "treeVersion": build_tree_version(),
+    })
 
 @app.route("/open", methods=["POST"])
 def open_file():
@@ -181,21 +245,77 @@ def open_file():
     if not os.path.isfile(path):
         raise FileNotFoundError("File not found")
 
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        return jsonify({"content": f.read()})
+    return jsonify(build_open_file_response(path))
 
 @app.route("/save", methods=["POST"])
 def save_file():
     payload = get_json_payload()
     path = safe_path(require_string(payload, "path"))
     content = payload.get("content")
+    expected_version = payload.get("expectedVersion")
+    force = bool(payload.get("force"))
 
     if not isinstance(content, str):
         raise ValueError("'content' must be a string")
 
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
-    return jsonify({"status": "saved"})
+    if expected_version is not None and not isinstance(expected_version, str):
+        raise ValueError("'expectedVersion' must be a string when provided")
+
+    if os.path.isdir(path):
+        raise ValueError("Cannot save a directory path")
+
+    current_meta = build_file_meta(path)
+    current_version = current_meta["version"] if current_meta else None
+
+    if not force and expected_version is not None and expected_version != current_version:
+        return jsonify({
+            "error": "File changed on disk",
+            "code": "version_conflict",
+            "currentMeta": current_meta,
+            "currentContent": read_text_file(path) if current_meta else "",
+        }), 409
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as file_handle:
+        file_handle.write(content)
+
+    return jsonify({
+        "status": "saved",
+        "meta": build_file_meta(path),
+        "treeVersion": build_tree_version(),
+    })
+
+@app.route("/watch", methods=["POST"])
+def watch_files():
+    payload = get_json_payload()
+    paths = payload.get("paths", [])
+    known_tree_version = payload.get("knownTreeVersion")
+
+    if not isinstance(paths, list):
+        raise ValueError("'paths' must be an array")
+
+    if known_tree_version is not None and not isinstance(known_tree_version, str):
+        raise ValueError("'knownTreeVersion' must be a string when provided")
+
+    watched_files = {}
+    for item in paths:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("Each watched path must be a non-empty string")
+
+        rel_path = normalize_client_path(item)
+        full_path = safe_path(rel_path)
+        meta = build_file_meta(full_path)
+        watched_files[rel_path] = {
+            "exists": meta is not None,
+            "meta": meta,
+        }
+
+    tree_version = build_tree_version()
+    return jsonify({
+        "files": watched_files,
+        "treeVersion": tree_version,
+        "treeChanged": known_tree_version != tree_version,
+    })
 
 @app.route("/create", methods=["POST"])
 def create():
@@ -212,7 +332,7 @@ def create():
     else:
         os.makedirs(path, exist_ok=True)
 
-    return jsonify({"status": "created"})
+    return jsonify({"status": "created", "treeVersion": build_tree_version()})
 
 @app.route("/rename", methods=["POST"])
 def rename():
@@ -225,7 +345,7 @@ def rename():
 
     os.makedirs(os.path.dirname(new), exist_ok=True)
     os.rename(old, new)
-    return jsonify({"status": "renamed"})
+    return jsonify({"status": "renamed", "treeVersion": build_tree_version()})
 
 @app.route("/delete", methods=["POST"])
 def delete():
@@ -239,7 +359,7 @@ def delete():
         shutil.rmtree(path)
     else:
         os.remove(path)
-    return jsonify({"status": "deleted"})
+    return jsonify({"status": "deleted", "treeVersion": build_tree_version()})
 
 @app.errorhandler(ValueError)
 def handle_value_error(error):

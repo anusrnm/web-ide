@@ -396,6 +396,7 @@ body { display:flex; }
 <div id="explorer">
     <p class="explorer-title">Explorer</p>
     <div class="toolbar">
+        <button class="icon-btn" id="toggle-explorer-btn" onclick="toggleExplorer()" title="Toggle Explorer" aria-label="Toggle Explorer"></button>
         <button class="icon-btn" id="new-file-btn" onclick="createItem('file')" title="New File" aria-label="New File"></button>
         <button class="icon-btn" id="new-folder-btn" onclick="createItem('folder')" title="New Folder" aria-label="New Folder"></button>
         <button class="icon-btn" id="logout-btn" onclick="logout()" title="Logout" aria-label="Logout">⎋</button>
@@ -436,6 +437,7 @@ let compareMode = false;
 let compareCandidatePath = null;
 let compareOriginalPath = null;
 let compareModifiedPath = null;
+let compareReturnPath = null;
 let compareReadOnlyModels = {};
 let selectedTreePath = null;
 let menuTarget = null;
@@ -445,9 +447,26 @@ let inlineEditState = null;
 let pendingInlineEdit = false;
 let pinnedTabs = {};
 let explorerHidden = false;
+let fileMetadata = {};
+let remoteFileSnapshots = {};
+let conflictFiles = {};
+let autoSaveTimers = {};
+let saveInFlight = {};
+let suppressModelChanges = {};
+let treeVersion = null;
+let treeFilePaths = [];
+let watchTimer = null;
+let paletteMode = "commands";
+let paletteEntries = [];
+let paletteFilteredEntries = [];
+let paletteHighlightIndex = 0;
 
 const MAX_RECENT = 12;
 const STORAGE_KEY = "ide_recentFiles";
+const READY_STATUS = "Ready";
+const AUTO_SAVE_DELAY = 1500;
+const WATCH_INTERVAL = 3000;
+const DEFAULT_PALETTE_PLACEHOLDER = "Type command name...";
 
 function loadRecentFiles(){
     try {
@@ -501,6 +520,8 @@ function createIcon(name){
         addPath("M2 2h8v3h4v9H2V2zm5 6v2h2v1H7v2h-1v-2H4v-1h2V8h1z");
     } else if(name === "folderPlus"){
         addPath("M2 3h4l2 2h6v8H2V3zm6 3v2h2v1H8v2H7v-2H5v-1h2V6h1z");
+    } else if(name === "sidebar"){
+        addPath("M2 2h12v12H2V2zm1 1v10h3V3H3zm4 0v10h6V3H7z");
     } else if(name === "chevronRight"){
         addPath("M5.5 3L10 8l-4.5 5V10zm3 5l-3-4.5v9L8.5 8z");
     } else if(name === "chevronDown"){
@@ -516,8 +537,10 @@ function setIcon(container, iconName){
 }
 
 function initToolbarIcons(){
+    const toggleExplorerButton = document.getElementById("toggle-explorer-btn");
     const newFile = document.getElementById("new-file-btn");
     const newFolder = document.getElementById("new-folder-btn");
+    if(toggleExplorerButton) setIcon(toggleExplorerButton, "sidebar");
     if(newFile) setIcon(newFile, "filePlus");
     if(newFolder) setIcon(newFolder, "folderPlus");
 }
@@ -564,23 +587,26 @@ async function resolveModelForCompare(path){
 
 function exitCompareMode(){
     if(!compareMode) return;
-    
+
+    const returnPath = compareReturnPath;
+
     if(diffEditor){
         diffEditor.dispose();
         diffEditor = null;
     }
-    
+
     Object.keys(compareReadOnlyModels).forEach(path => {
         const model = compareReadOnlyModels[path];
         if(model) model.dispose();
     });
     compareReadOnlyModels = {};
-    
+
     compareMode = false;
     compareCandidatePath = null;
     compareOriginalPath = null;
     compareModifiedPath = null;
-    
+    compareReturnPath = null;
+
     const editorContainer = document.getElementById('editor');
     editorContainer.innerHTML = '';
     editor = monaco.editor.create(editorContainer, {
@@ -588,49 +614,97 @@ function exitCompareMode(){
         automaticLayout:true
     });
     editor.onDidChangeCursorPosition(updateStatus);
-    
+
+    currentFile = returnPath && models[returnPath] ? returnPath : null;
     if(currentFile && models[currentFile]){
         editor.setModel(models[currentFile]);
+        updateStatus();
+    } else {
+        editor.setModel(null);
+        setStatus(READY_STATUS);
     }
-    
-    setStatus('Compare mode exited');
 }
 
 async function startCompare(originalPath, modifiedPath){
     try {
         originalPath = normalizePath(originalPath);
         modifiedPath = normalizePath(modifiedPath);
-        
+
         const origData = await resolveModelForCompare(originalPath);
         const modData = await resolveModelForCompare(modifiedPath);
-        
+
         if(diffEditor) diffEditor.dispose();
-        
+
         const editorContainer = document.getElementById('editor');
         editorContainer.innerHTML = '';
-        
+
         diffEditor = monaco.editor.createDiffEditor(editorContainer, {
             theme:'vs-dark',
             automaticLayout:true,
             readOnly:false,
             originalEditable:false
         });
-        
+
         diffEditor.setModel({
             original: origData.model,
             modified: modData.model
         });
-        
+
         compareMode = true;
         compareOriginalPath = originalPath;
         compareModifiedPath = modifiedPath;
+        compareReturnPath = modifiedPath;
         currentFile = null;
-        
+
         setStatus(`Comparing: ${basename(originalPath)} ↔ ${basename(modifiedPath)}`);
     } catch (error) {
         setStatus(`Compare failed: ${error.message}`, true);
         exitCompareMode();
     }
+}
+
+async function startCompareWithContent(path, originalContent, originalLabel="Disk"){
+    path = normalizePath(path);
+
+    if(!models[path]){
+        setStatus(`Compare failed: ${basename(path)} is not open`, true);
+        return;
+    }
+
+    const compareKey = `__compare__:${path}`;
+    if(compareReadOnlyModels[compareKey]){
+        compareReadOnlyModels[compareKey].dispose();
+    }
+
+    compareReadOnlyModels[compareKey] = monaco.editor.createModel(
+        originalContent,
+        detectLanguage(path)
+    );
+
+    if(diffEditor) diffEditor.dispose();
+
+    const editorContainer = document.getElementById('editor');
+    editorContainer.innerHTML = '';
+
+    diffEditor = monaco.editor.createDiffEditor(editorContainer, {
+        theme:'vs-dark',
+        automaticLayout:true,
+        readOnly:false,
+        originalEditable:false
+    });
+
+    diffEditor.setModel({
+        original: compareReadOnlyModels[compareKey],
+        modified: models[path]
+    });
+
+    compareMode = true;
+    compareOriginalPath = compareKey;
+    compareModifiedPath = path;
+    compareReturnPath = path;
+    currentFile = null;
+
+    setStatus(`Comparing: ${originalLabel} ↔ ${basename(path)}`);
 }
 
 require(['vs/editor/editor.main'], function(){
@@ -648,7 +722,10 @@ require(['vs/editor/editor.main'], function(){
         }
     });
 
-    loadTree();
+    loadTree().then(()=>{
+        ensureWatchPolling();
+        pollWorkspaceUpdates();
+    });
 });
 
 initToolbarIcons();
@@ -658,13 +735,24 @@ function buildCommandRegistry(){
     const baseActions = {
         newFile: async ()=> createItem("file"),
         newFolder: async ()=> createItem("folder"),
+        quickOpen: async ()=> showQuickOpenPalette(),
+        toggleExplorer: async ()=> toggleExplorer(),
+        findInFile: async ()=> {
+            const activeEditor = getActiveEditorInstance();
+            if(activeEditor){
+                activeEditor.getAction("actions.find").run();
+            }
+        },
         saveFile: async ()=> save(),
         saveAll: async ()=> {
+            const activePath = currentFile;
             for(const path of Object.keys(models)){
                 if(dirtyFiles[path]){
-                    currentFile = path;
-                    await save();
+                    await save(path, { reason: "manual" });
                 }
+            }
+            if(activePath && models[activePath] && !compareMode){
+                setActive(activePath);
             }
             setStatus("All files saved");
         },
@@ -682,10 +770,12 @@ function buildCommandRegistry(){
             showRecentPalette();
         },
         undo: async ()=> {
-            if(editor && editor.hasTextFocus()) editor.trigger('keyboard', 'undo');
+            const activeEditor = getActiveEditorInstance();
+            if(activeEditor && activeEditor.hasTextFocus()) activeEditor.trigger('keyboard', 'undo');
         },
         redo: async ()=> {
-            if(editor && editor.hasTextFocus()) editor.trigger('keyboard', 'redo');
+            const activeEditor = getActiveEditorInstance();
+            if(activeEditor && activeEditor.hasTextFocus()) activeEditor.trigger('keyboard', 'redo');
         },
         selectForCompare: async ()=> {
             if(!currentFile){
@@ -716,6 +806,9 @@ function buildCommandRegistry(){
     };
 
     const commands = [
+        { id: "quickOpen", label: "Quick Open", action: baseActions.quickOpen, keys: "Ctrl+P" },
+        { id: "toggleExplorer", label: "Toggle Explorer", action: baseActions.toggleExplorer, keys: "Ctrl+B" },
+        { id: "findInFile", label: "Find In File", action: baseActions.findInFile, keys: "Ctrl+F" },
         { id: "newFile", label: "New File", action: baseActions.newFile, keys: "" },
         { id: "newFolder", label: "New Folder", action: baseActions.newFolder, keys: "" },
         { id: "saveFile", label: "Save File", action: baseActions.saveFile, keys: "Ctrl+S" },
@@ -734,89 +827,176 @@ function buildCommandRegistry(){
 
 const commandRegistry = buildCommandRegistry();
 
-function showCommandPalette(){
-    const palette = document.getElementById("command-palette");
-    const input = document.getElementById("palette-input");
-    const items = document.getElementById("palette-items");
-
-    palette.style.display = "flex";
-    input.value = "";
-    input.focus();
-    populatePaletteItems(commandRegistry.commands, items);
+function buildCommandPaletteEntries(commands){
+    return commands.map((command)=>(
+        {
+            id: command.id,
+            label: command.label,
+            hint: command.keys || "",
+            searchText: `${command.label} ${command.keys || ""}`.toLowerCase(),
+            action: async ()=>{
+                hideCommandPalette();
+                await command.action();
+            }
+        }
+    ));
 }
 
-function hideCommandPalette(){
-    document.getElementById("command-palette").style.display = "none";
+function buildFilePaletteEntries(paths){
+    return paths.map((path)=>(
+        {
+            id: path,
+            label: basename(path),
+            hint: path,
+            name: basename(path).toLowerCase(),
+            path: path,
+            searchText: `${basename(path)} ${path}`.toLowerCase(),
+            action: async ()=>{
+                hideCommandPalette();
+                await openFile(path);
+            }
+        }
+    ));
 }
 
-function populatePaletteItems(commands, container, filter=""){
+function scorePaletteEntry(entry, filter){
+    if(paletteMode !== "files"){
+        const label = entry.label.toLowerCase();
+        if(label === filter) return 0;
+        if(label.startsWith(filter)) return 1;
+        if(entry.searchText.includes(filter)) return 2;
+        return 3;
+    }
+
+    const name = entry.name || entry.label.toLowerCase();
+    const path = (entry.path || entry.label).toLowerCase();
+    if(name === filter) return 0;
+    if(name.startsWith(filter)) return 1;
+    if(path.startsWith(filter)) return 2;
+    if(name.includes(filter)) return 3;
+    if(path.includes(filter)) return 4;
+    return 5;
+}
+
+function filterPaletteEntries(filter){
+    const normalizedFilter = filter.toLowerCase().trim();
+    if(!normalizedFilter){
+        return paletteEntries.slice(0, 200);
+    }
+
+    const terms = normalizedFilter.split(/\s+/).filter(Boolean);
+    return paletteEntries
+        .filter((entry)=> terms.every((term)=> entry.searchText.includes(term)))
+        .sort((left, right)=>{
+            const scoreDiff = scorePaletteEntry(left, normalizedFilter) - scorePaletteEntry(right, normalizedFilter);
+            if(scoreDiff !== 0) return scoreDiff;
+            return left.label.localeCompare(right.label);
+        })
+        .slice(0, 200);
+}
+
+function renderPaletteItems(filter="", preserveHighlight=false){
+    const container = document.getElementById("palette-items");
+    const emptyMessage = document.getElementById("command-palette").dataset.emptyMessage || "No results found";
+
+    paletteFilteredEntries = filterPaletteEntries(filter);
+    if(!preserveHighlight){
+        paletteHighlightIndex = 0;
+    } else if(paletteFilteredEntries.length){
+        paletteHighlightIndex = Math.max(0, Math.min(paletteHighlightIndex, paletteFilteredEntries.length - 1));
+    } else {
+        paletteHighlightIndex = 0;
+    }
+
     container.innerHTML = "";
-    const filtered = filter
-        ? commands.filter(cmd => cmd.label.toLowerCase().includes(filter.toLowerCase()))
-        : commands;
-
-    for(const cmd of filtered){
+    for(const [index, entry] of paletteFilteredEntries.entries()){
         const item = document.createElement("div");
-        item.className = "palette-item";
-        item.dataset.id = cmd.id;
+        item.className = `palette-item${index === paletteHighlightIndex ? " highlighted" : ""}`;
+        item.dataset.index = index;
 
         const label = document.createElement("span");
-        label.textContent = cmd.label;
+        label.textContent = entry.label;
 
         const hint = document.createElement("span");
         hint.className = "palette-hint";
-        hint.textContent = cmd.keys || "";
+        hint.textContent = entry.hint || "";
 
         item.appendChild(label);
         item.appendChild(hint);
-
+        item.onmouseenter = ()=>{
+            paletteHighlightIndex = index;
+            renderPaletteItems(document.getElementById("palette-input").value, true);
+        };
         item.onclick = async ()=>{
-            const action = commandRegistry.commands.find(c => c.id === cmd.id)?.action;
-            if(action){
-                hideCommandPalette();
-                await action();
-            }
+            await entry.action();
         };
 
         container.appendChild(item);
     }
 
-    if(!filtered.length){
+    if(!paletteFilteredEntries.length){
         const msg = document.createElement("div");
         msg.style.cssText = "padding:12px;color:#888;text-align:center;";
-        msg.textContent = "No commands found";
+        msg.textContent = emptyMessage;
         container.appendChild(msg);
     }
 }
 
-function showRecentPalette(){
+async function activateHighlightedPaletteEntry(){
+    const entry = paletteFilteredEntries[paletteHighlightIndex];
+    if(entry){
+        await entry.action();
+    }
+}
+
+function openPalette(mode, entries, options={}){
     const palette = document.getElementById("command-palette");
     const input = document.getElementById("palette-input");
-    const items = document.getElementById("palette-items");
 
+    paletteMode = mode;
+    paletteEntries = entries;
+    paletteFilteredEntries = [];
+    paletteHighlightIndex = 0;
+    palette.dataset.emptyMessage = options.emptyMessage || "No results found";
     palette.style.display = "flex";
-    input.value = "(recent files)";
+    input.placeholder = options.placeholder || DEFAULT_PALETTE_PLACEHOLDER;
+    input.value = options.initialValue || "";
+    renderPaletteItems(input.value);
     input.focus();
+}
 
-    items.innerHTML = "";
-    if(!recentFiles.length){
-        const msg = document.createElement("div");
-        msg.style.cssText = "padding:12px;color:#888;";
-        msg.textContent = "No recent files";
-        items.appendChild(msg);
-        return;
-    }
+function showCommandPalette(){
+    openPalette("commands", buildCommandPaletteEntries(commandRegistry.commands), {
+        placeholder: DEFAULT_PALETTE_PLACEHOLDER,
+        emptyMessage: "No commands found"
+    });
+}
 
-    for(const path of recentFiles){
-        const item = document.createElement("div");
-        item.className = "palette-item";
-        item.textContent = path;
-        item.onclick = async ()=>{
-            hideCommandPalette();
-            await openFile(path);
-        };
-        items.appendChild(item);
-    }
+function showQuickOpenPalette(){
+    openPalette("files", buildFilePaletteEntries(treeFilePaths), {
+        placeholder: "Type a file name or path...",
+        emptyMessage: "No files found"
+    });
+}
+
+function hideCommandPalette(){
+    const palette = document.getElementById("command-palette");
+    const input = document.getElementById("palette-input");
+
+    palette.style.display = "none";
+    paletteMode = "commands";
+    paletteEntries = [];
+    paletteFilteredEntries = [];
+    paletteHighlightIndex = 0;
+    input.placeholder = DEFAULT_PALETTE_PLACEHOLDER;
+    input.value = "";
+}
+
+function showRecentPalette(){
+    openPalette("files", buildFilePaletteEntries(recentFiles), {
+        placeholder: "Type a recent file name or path...",
+        emptyMessage: "No recent files"
+    });
 }
 
 function basename(path){
@@ -835,6 +1015,94 @@ function joinPath(parent, name){
 function getTabElement(path){
     return Array.from(document.querySelectorAll(".tab"))
         .find(t => t.dataset.path === path) || null;
+}
+
+function getActiveEditorInstance(){
+    return compareMode && diffEditor ? diffEditor.getModifiedEditor() : editor;
+}
+
+function trackFileMeta(path, meta){
+    path = normalizePath(path);
+    if(meta){
+        fileMetadata[path] = meta;
+    } else {
+        delete fileMetadata[path];
+    }
+}
+
+function clearAutoSaveTimer(path){
+    if(autoSaveTimers[path]){
+        clearTimeout(autoSaveTimers[path]);
+        delete autoSaveTimers[path];
+    }
+}
+
+function clearFileState(path){
+    clearAutoSaveTimer(path);
+    delete saveInFlight[path];
+    delete fileMetadata[path];
+    delete remoteFileSnapshots[path];
+    delete conflictFiles[path];
+    delete suppressModelChanges[path];
+}
+
+function withSuppressedModelChanges(path, callback){
+    suppressModelChanges[path] = (suppressModelChanges[path] || 0) + 1;
+    try {
+        callback();
+    } finally {
+        suppressModelChanges[path] -= 1;
+        if(suppressModelChanges[path] <= 0){
+            delete suppressModelChanges[path];
+        }
+    }
+}
+
+function setModelContent(path, content, options={}){
+    const model = models[path];
+    if(!model) return;
+
+    const activeEditor = getActiveEditorInstance();
+    const restoreViewState = !compareMode && currentFile === path && activeEditor === editor;
+    const viewState = restoreViewState ? editor.saveViewState() : null;
+
+    withSuppressedModelChanges(path, ()=>{
+        model.setValue(content);
+    });
+
+    dirtyFiles[path] = !!options.markDirty;
+    updateTabState(path);
+
+    if(viewState && currentFile === path && !compareMode){
+        editor.restoreViewState(viewState);
+    }
+
+    updateStatus();
+}
+
+function setExplorerHidden(hidden){
+    const explorer = document.getElementById("explorer");
+    const divider = document.getElementById("divider");
+
+    explorerHidden = hidden;
+    explorer.classList.toggle("hidden", hidden);
+    divider.classList.toggle("explorer-hidden", hidden);
+    divider.style.cursor = hidden ? "pointer" : "col-resize";
+}
+
+function toggleExplorer(){
+    setExplorerHidden(!explorerHidden);
+}
+
+function collectFilePaths(nodes, result=[]){
+    for(const node of nodes || []){
+        if(node.type === "file"){
+            result.push(normalizePath(node.path));
+        } else if(node.type === "folder"){
+            collectFilePaths(node.children || [], result);
+        }
+    }
+    return result;
 }
 
 function setStatus(message, isError=false){
@@ -1094,7 +1362,10 @@ async function requestJson(url, options={}){
             throw new Error("Authentication required");
         }
         const message = data.error || `Request failed (${response.status})`;
-        throw new Error(message);
+        const error = new Error(message);
+        error.payload = data;
+        error.status = response.status;
+        throw error;
     }
 
     return data;
@@ -1123,12 +1394,174 @@ function detectLanguage(file){
     return map[ext] || "plaintext";
 }
 
+function scheduleAutoSave(path){
+    path = normalizePath(path);
+    clearAutoSaveTimer(path);
+
+    if(!dirtyFiles[path] || conflictFiles[path]) return;
+
+    autoSaveTimers[path] = setTimeout(()=>{
+        save(path, { reason: "autosave" });
+    }, AUTO_SAVE_DELAY);
+
+    if(path === currentFile){
+        updateStatus();
+    }
+}
+
+async function reloadFileFromDisk(path, reason="updated"){
+    const data = await requestJson("/open", {
+        method:"POST",
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({path})
+    });
+
+    trackFileMeta(path, data.meta);
+    delete remoteFileSnapshots[path];
+    delete conflictFiles[path];
+    setModelContent(path, data.content, { markDirty: false });
+
+    if(path === currentFile){
+        setStatus(`Reloaded ${basename(path)} from disk (${reason})`);
+    }
+
+    return data;
+}
+
+async function handleRemoteMissingFile(path){
+    path = normalizePath(path);
+    clearAutoSaveTimer(path);
+
+    if(!models[path]){
+        clearFileState(path);
+        return;
+    }
+
+    if(dirtyFiles[path]){
+        conflictFiles[path] = true;
+        delete fileMetadata[path];
+        remoteFileSnapshots[path] = "";
+        updateTabState(path);
+        if(path === currentFile){
+            setStatus(`${basename(path)} was deleted on disk. Save to recreate or close the tab.`, true);
+        }
+        return;
+    }
+
+    closeTab(path, true);
+    clearFileState(path);
+    removeRecentFile(path);
+    setStatus(`${basename(path)} was deleted on disk`, true);
+}
+
+async function handleRemoteFileChange(path, incomingMeta){
+    path = normalizePath(path);
+
+    if(!models[path]){
+        trackFileMeta(path, incomingMeta);
+        return;
+    }
+
+    if(dirtyFiles[path]){
+        clearAutoSaveTimer(path);
+        conflictFiles[path] = true;
+        updateTabState(path);
+
+        try {
+            const diskData = await requestJson("/open", {
+                method:"POST",
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({path})
+            });
+            remoteFileSnapshots[path] = diskData.content;
+            trackFileMeta(path, diskData.meta);
+        } catch {
+            remoteFileSnapshots[path] = "";
+            trackFileMeta(path, incomingMeta);
+        }
+
+        if(path === currentFile){
+            setStatus(`${basename(path)} changed on disk. Save to overwrite or compare first.`, true);
+        }
+        return;
+    }
+
+    try {
+        await reloadFileFromDisk(path, "external update");
+    } catch (error) {
+        if(error.status === 404){
+            await handleRemoteMissingFile(path);
+            return;
+        }
+        throw error;
+    }
+}
+
+async function pollWorkspaceUpdates(){
+    if(document.hidden) return;
+
+    try {
+        const watchedPaths = Object.keys(models);
+        const data = await requestJson("/watch", {
+            method:"POST",
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({
+                paths: watchedPaths,
+                knownTreeVersion: treeVersion
+            })
+        });
+
+        if(typeof data.treeVersion === "string"){
+            treeVersion = data.treeVersion;
+        }
+
+        if(data.treeChanged){
+            await loadTree();
+        }
+
+        for(const [path, info] of Object.entries(data.files || {})){
+            const knownVersion = fileMetadata[path]?.version || null;
+            const nextVersion = info?.meta?.version || null;
+
+            if(!info.exists){
+                await handleRemoteMissingFile(path);
+                continue;
+            }
+
+            if(!knownVersion){
+                trackFileMeta(path, info.meta);
+                continue;
+            }
+
+            if(knownVersion !== nextVersion){
+                await handleRemoteFileChange(path, info.meta);
+            }
+        }
+    } catch (error) {
+        console.error("Workspace watch failed", error);
+    }
+}
+
+function ensureWatchPolling(){
+    if(watchTimer) return;
+    watchTimer = setInterval(()=>{
+        pollWorkspaceUpdates();
+    }, WATCH_INTERVAL);
+}
+
 async function loadTree(){
     try {
         const data = await requestJson("/tree");
+        const nodes = Array.isArray(data) ? data : (data.tree || []);
         const tree = document.getElementById("tree");
+
         tree.innerHTML = "";
-        tree.appendChild(buildTree(data));
+        tree.appendChild(buildTree(nodes));
+        treeFilePaths = collectFilePaths(nodes, []);
+        if(typeof data.treeVersion === "string"){
+            treeVersion = data.treeVersion;
+        }
+
         if(selectedTreePath){
             setTreeSelection(selectedTreePath);
         }
@@ -1236,9 +1669,18 @@ async function openFile(path){
             detectLanguage(path)
         );
 
+        trackFileMeta(path, data.meta);
+        delete conflictFiles[path];
+        delete remoteFileSnapshots[path];
+
         modelListeners[path] = models[path].onDidChangeContent(()=>{
+            if(suppressModelChanges[path]) return;
             dirtyFiles[path] = true;
             updateTabState(path);
+            scheduleAutoSave(path);
+            if(path === currentFile){
+                updateStatus();
+            }
         });
 
         dirtyFiles[path] = false;
@@ -1290,6 +1732,11 @@ function createTab(path){
 function setActive(path){
     if(!models[path]) return;
 
+    const previousFile = currentFile;
+    if(previousFile && previousFile !== path && dirtyFiles[previousFile] && !conflictFiles[previousFile]){
+        save(previousFile, { reason: "autosave" });
+    }
+
     currentFile = path;
     editor.setModel(models[path]);
     setTreeSelection(path);
@@ -1309,6 +1756,8 @@ function closeTab(path, force=false){
         if(!shouldClose) return;
     }
 
+    clearAutoSaveTimer(path);
+
     if(modelListeners[path]){
         modelListeners[path].dispose();
         delete modelListeners[path];
@@ -1325,9 +1774,11 @@ function closeTab(path, force=false){
     closedTabs.push(path);
     if(closedTabs.length > 20) closedTabs.shift();
 
-    if(compareMode && (path === compareOriginalPath || path === compareModifiedPath)){
+    if(compareMode && (path === compareOriginalPath || path === compareModifiedPath || path === compareReturnPath)){
         exitCompareMode();
     }
+
+    clearFileState(path);
 
     if(currentFile === path){
         const remainingTabs = Array.from(document.querySelectorAll(".tab"));
@@ -1337,7 +1788,7 @@ function closeTab(path, force=false){
             if(compareMode) exitCompareMode();
             editor.setModel(null);
             currentFile = null;
-            setStatus("Ready");
+            setStatus(READY_STATUS);
         }
     }
 }
@@ -1346,6 +1797,7 @@ function updateTabState(path){
     const tab = getTabElement(path);
     if(!tab) return;
     tab.classList.toggle("dirty", !!dirtyFiles[path]);
+    tab.title = conflictFiles[path] ? "File changed on disk" : "";
     const pinIcon = tab.querySelector(".pin-icon");
     if(pinIcon) pinIcon.classList.toggle("pinned", !!pinnedTabs[path]);
 }
@@ -1367,24 +1819,93 @@ function reorganizeTabs(){
     unpinned.forEach(t => tabs.appendChild(t));
 }
 
-async function save(){
-    if(!currentFile) return;
+async function save(path=currentFile, options={}){
+    path = normalizePath(path);
+    if(!path || compareMode) return false;
+    if(!models[path] || saveInFlight[path]) return false;
+
+    const reason = options.reason || "manual";
+    const force = !!options.force;
+
+    clearAutoSaveTimer(path);
+
+    if(reason === "manual" && conflictFiles[path] && !force){
+        const shouldOverwrite = confirm(`${basename(path)} changed on disk. Press OK to overwrite the disk version with your local changes. Press Cancel to compare first.`);
+        if(!shouldOverwrite){
+            if(remoteFileSnapshots[path] !== undefined){
+                await startCompareWithContent(path, remoteFileSnapshots[path], `Disk: ${basename(path)}`);
+            }
+            return false;
+        }
+        return save(path, { ...options, force: true });
+    }
+
+    const model = models[path];
+    const activeEditor = getActiveEditorInstance();
+    const content = path === currentFile && !compareMode && activeEditor ? activeEditor.getValue() : model.getValue();
+
+    saveInFlight[path] = reason;
+    let refreshStatus = false;
+    if(path === currentFile){
+        updateStatus();
+    }
 
     try {
-        await requestJson("/save",{
+        const data = await requestJson("/save",{
             method:"POST",
             headers:{'Content-Type':'application/json'},
             body:JSON.stringify({
-                path:currentFile,
-                content:editor.getValue()
+                path,
+                content,
+                expectedVersion: fileMetadata[path]?.version || null,
+                force
             })
         });
 
-        dirtyFiles[currentFile] = false;
-        updateTabState(currentFile);
-        updateStatus();
+        dirtyFiles[path] = false;
+        delete conflictFiles[path];
+        delete remoteFileSnapshots[path];
+        trackFileMeta(path, data.meta);
+        if(typeof data.treeVersion === "string"){
+            treeVersion = data.treeVersion;
+        }
+        updateTabState(path);
+        refreshStatus = path === currentFile;
+        return true;
     } catch (error) {
-        setStatus(`Save failed: ${error.message}`, true);
+        if(error.status === 409 && error.payload?.code === "version_conflict"){
+            conflictFiles[path] = true;
+            remoteFileSnapshots[path] = error.payload.currentContent || "";
+            if(error.payload.currentMeta){
+                trackFileMeta(path, error.payload.currentMeta);
+            }
+            updateTabState(path);
+
+            if(reason === "autosave"){
+                if(path === currentFile){
+                    setStatus(`Autosave paused: ${basename(path)} changed on disk`, true);
+                }
+            } else {
+                const shouldCompare = confirm(`${basename(path)} changed on disk. Press OK to compare, or Cancel to keep your local changes.`);
+                if(shouldCompare && remoteFileSnapshots[path] !== undefined){
+                    await startCompareWithContent(path, remoteFileSnapshots[path], `Disk: ${basename(path)}`);
+                } else if(path === currentFile){
+                    setStatus(`Save blocked: ${basename(path)} changed on disk`, true);
+                }
+            }
+            return false;
+        }
+
+        if(path === currentFile){
+            const label = reason === "autosave" ? "Autosave failed" : "Save failed";
+            setStatus(`${label}: ${error.message}`, true);
+        }
+        return false;
+    } finally {
+        delete saveInFlight[path];
+        if(refreshStatus && path === currentFile){
+            updateStatus();
+        }
     }
 }
 
@@ -1399,14 +1920,29 @@ async function logout(){
 }
 
 function updateStatus(){
+    if(compareMode) return;
+
     if(!currentFile){
-        setStatus("Ready");
+        setStatus(READY_STATUS);
         return;
     }
 
-    const p = editor.getPosition();
-    const dirty = dirtyFiles[currentFile] ? " (Unsaved)" : "";
-    setStatus(`${currentFile}${dirty} | Ln ${p.lineNumber}, Col ${p.column}`);
+    const position = editor ? editor.getPosition() : null;
+    let stateLabel = "";
+
+    if(conflictFiles[currentFile]){
+        stateLabel = " (Conflict)";
+    } else if(saveInFlight[currentFile] === "autosave"){
+        stateLabel = " (Autosaving)";
+    } else if(saveInFlight[currentFile]){
+        stateLabel = " (Saving)";
+    } else if(dirtyFiles[currentFile]){
+        stateLabel = " (Unsaved)";
+    }
+
+    const lineNumber = position?.lineNumber || 1;
+    const column = position?.column || 1;
+    setStatus(`${currentFile}${stateLabel} | Ln ${lineNumber}, Col ${column}`);
 }
 
 function syncRenamedFileInTabs(oldPath, newPath){
@@ -1419,6 +1955,7 @@ function syncRenamedFileInTabs(oldPath, newPath){
         const targetPath = sourcePath === oldPath
             ? newPath
             : `${newPath}${sourcePath.slice(oldPath.length)}`;
+        const hadAutoSaveTimer = !!autoSaveTimers[sourcePath];
 
         models[targetPath] = models[sourcePath];
         delete models[sourcePath];
@@ -1428,6 +1965,27 @@ function syncRenamedFileInTabs(oldPath, newPath){
             delete modelListeners[sourcePath];
         }
 
+        if(fileMetadata[sourcePath]){
+            fileMetadata[targetPath] = fileMetadata[sourcePath];
+            delete fileMetadata[sourcePath];
+        }
+
+        if(remoteFileSnapshots[sourcePath] !== undefined){
+            remoteFileSnapshots[targetPath] = remoteFileSnapshots[sourcePath];
+            delete remoteFileSnapshots[sourcePath];
+        }
+
+        if(conflictFiles[sourcePath]){
+            conflictFiles[targetPath] = conflictFiles[sourcePath];
+            delete conflictFiles[sourcePath];
+        }
+
+        if(saveInFlight[sourcePath]){
+            saveInFlight[targetPath] = saveInFlight[sourcePath];
+            delete saveInFlight[sourcePath];
+        }
+
+        clearAutoSaveTimer(sourcePath);
         dirtyFiles[targetPath] = dirtyFiles[sourcePath];
         delete dirtyFiles[sourcePath];
 
@@ -1436,6 +1994,10 @@ function syncRenamedFileInTabs(oldPath, newPath){
             tab.dataset.path = targetPath;
             const label = tab.querySelector(".tab-label");
             if(label) label.textContent = basename(targetPath);
+        }
+
+        if(hadAutoSaveTimer && dirtyFiles[targetPath] && !conflictFiles[targetPath]){
+            scheduleAutoSave(targetPath);
         }
 
         if(currentFile === sourcePath){
@@ -1466,7 +2028,7 @@ async function createItemWithPath(type, targetPath){
     }
 
     try {
-        await requestJson("/create",{
+        const data = await requestJson("/create",{
             method:"POST",
             headers:{'Content-Type':'application/json'},
             body:JSON.stringify({
@@ -1474,6 +2036,9 @@ async function createItemWithPath(type, targetPath){
                 type:type
             })
         });
+        if(typeof data.treeVersion === "string"){
+            treeVersion = data.treeVersion;
+        }
         await loadTree();
         setTreeSelection(normalizePath(targetPath));
     } catch (error) {
@@ -1487,7 +2052,7 @@ async function renamePath(path, newName){
     const target = normalizePath(joinPath(dirname(path), newName));
 
     try {
-        await requestJson("/rename",{
+        const data = await requestJson("/rename",{
             method:"POST",
             headers:{'Content-Type':'application/json'},
             body:JSON.stringify({
@@ -1495,6 +2060,10 @@ async function renamePath(path, newName){
                 new:target
             })
         });
+
+        if(typeof data.treeVersion === "string"){
+            treeVersion = data.treeVersion;
+        }
 
         if(compareMode && (normalizePath(path) === compareOriginalPath || normalizePath(path) === compareModifiedPath)){
             exitCompareMode();
@@ -1513,11 +2082,15 @@ async function deletePath(path){
     if(!confirmed) return;
 
     try {
-        await requestJson("/delete",{
+        const data = await requestJson("/delete",{
             method:"POST",
             headers:{'Content-Type':'application/json'},
             body:JSON.stringify({path:normalizePath(path)})
         });
+
+        if(typeof data.treeVersion === "string"){
+            treeVersion = data.treeVersion;
+        }
 
         const targetPrefix = `${path}/`;
         const affectedTabs = Object.keys(models).filter((key)=>
@@ -1550,7 +2123,18 @@ document.getElementById("search").addEventListener("input", function(){
 loadRecentFiles();
 
 document.addEventListener("keydown", (event)=>{
-    if(event.ctrlKey && event.shiftKey && event.key === "P"){
+    const activeEditor = getActiveEditorInstance();
+
+    if(event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "p"){
+        event.preventDefault();
+        showQuickOpenPalette();
+    } else if(event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "b"){
+        event.preventDefault();
+        commandRegistry.actions.toggleExplorer();
+    } else if(event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "f"){
+        event.preventDefault();
+        commandRegistry.actions.findInFile();
+    } else if(event.ctrlKey && event.shiftKey && event.key === "P"){
         event.preventDefault();
         showCommandPalette();
     } else if(event.ctrlKey && event.shiftKey && event.key === "T"){
@@ -1560,17 +2144,16 @@ document.addEventListener("keydown", (event)=>{
         event.preventDefault();
         commandRegistry.actions.saveAll();
     } else if(event.ctrlKey && event.key === "z" && !event.shiftKey){
-        if(editor && editor.hasTextFocus()){
+        if(activeEditor && activeEditor.hasTextFocus()){
             event.preventDefault();
             commandRegistry.actions.undo();
         }
     } else if((event.ctrlKey && event.shiftKey && event.key === "Z") || (event.ctrlKey && event.key === "y")){
-        if(editor && editor.hasTextFocus()){
+        if(activeEditor && activeEditor.hasTextFocus()){
             event.preventDefault();
             commandRegistry.actions.redo();
         }
     } else if(event.key === "Delete" && !pendingInlineEdit){
-        // Delete selected tree item
         if(selectedTreePath){
             event.preventDefault();
             deletePath(selectedTreePath);
@@ -1585,9 +2168,29 @@ document.getElementById("command-palette").addEventListener("click", (event)=>{
 });
 
 document.getElementById("palette-input").addEventListener("input", (event)=>{
-    const filter = event.target.value;
-    const items = document.getElementById("palette-items");
-    populatePaletteItems(commandRegistry.commands, items, filter);
+    renderPaletteItems(event.target.value);
+});
+
+document.getElementById("palette-input").addEventListener("keydown", async (event)=>{
+    if(event.key === "ArrowDown"){
+        event.preventDefault();
+        if(paletteFilteredEntries.length){
+            paletteHighlightIndex = (paletteHighlightIndex + 1) % paletteFilteredEntries.length;
+            renderPaletteItems(event.currentTarget.value, true);
+        }
+    } else if(event.key === "ArrowUp"){
+        event.preventDefault();
+        if(paletteFilteredEntries.length){
+            paletteHighlightIndex = (paletteHighlightIndex - 1 + paletteFilteredEntries.length) % paletteFilteredEntries.length;
+            renderPaletteItems(event.currentTarget.value, true);
+        }
+    } else if(event.key === "Enter"){
+        event.preventDefault();
+        await activateHighlightedPaletteEntry();
+    } else if(event.key === "Escape"){
+        event.preventDefault();
+        hideCommandPalette();
+    }
 });
 
 document.addEventListener("keydown", (event)=>{
@@ -1598,47 +2201,46 @@ document.addEventListener("keydown", (event)=>{
     }
 });
 
+document.addEventListener("visibilitychange", ()=>{
+    if(!document.hidden){
+        pollWorkspaceUpdates();
+    }
+});
+
+window.addEventListener("blur", ()=>{
+    Object.keys(models).forEach((path)=>{
+        if(dirtyFiles[path] && !conflictFiles[path]){
+            save(path, { reason: "autosave" });
+        }
+    });
+});
+
 document.getElementById("divider").addEventListener("mousedown", function(){
     document.onmousemove = function(e){
         const explorer = document.getElementById("explorer");
         const newWidth = e.clientX;
-        
+
         if(newWidth < 50){
-            // Hide explorer
             if(!explorerHidden){
-                explorerHidden = true;
-                explorer.classList.add("hidden");
-                document.getElementById("divider").classList.add("explorer-hidden");
+                setExplorerHidden(true);
             }
         } else {
-            // Show explorer
             if(explorerHidden){
-                explorerHidden = false;
-                explorer.classList.remove("hidden");
-                document.getElementById("divider").classList.remove("explorer-hidden");
+                setExplorerHidden(false);
             }
             explorer.style.width = newWidth + "px";
         }
     };
     document.onmouseup = function(){
         document.onmousemove = null;
-        
-        // Allow clicking divider to toggle explorer if hidden
-        if(explorerHidden){
-            document.getElementById("divider").style.cursor = "pointer";
-        }
     };
 });
 
-// Click divider to restore explorer when hidden
 document.getElementById("divider").addEventListener("click", function(){
     if(explorerHidden){
-        explorerHidden = false;
         const explorer = document.getElementById("explorer");
-        explorer.classList.remove("hidden");
-        document.getElementById("divider").classList.remove("explorer-hidden");
+        setExplorerHidden(false);
         explorer.style.width = "280px";
-        this.style.cursor = "col-resize";
     }
 });
 </script>

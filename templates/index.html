@@ -49,6 +49,14 @@ body { display:flex; }
     overflow:hidden;
 }
 
+#editor-container {
+    flex:1;
+    min-height:0;
+    min-width:0;
+    position:relative;
+    overflow:hidden;
+}
+
 #tabs {
     display:flex;
     background:#252526;
@@ -148,8 +156,46 @@ body { display:flex; }
 .close:hover { color:#ff7b72; }
 
 #editor {
-    flex:1;
-    min-height:0;
+    position:absolute;
+    inset:0;
+}
+
+#image-preview {
+    position:absolute;
+    inset:0;
+    display:none;
+    align-items:center;
+    justify-content:center;
+    flex-direction:column;
+    gap:12px;
+    background:
+        linear-gradient(45deg, rgba(255,255,255,0.05) 25%, transparent 25%),
+        linear-gradient(-45deg, rgba(255,255,255,0.05) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, rgba(255,255,255,0.05) 75%),
+        linear-gradient(-45deg, transparent 75%, rgba(255,255,255,0.05) 75%),
+        #1a1a1a;
+    background-size:24px 24px;
+    background-position:0 0, 0 12px, 12px -12px, -12px 0;
+    padding:18px;
+}
+
+#image-preview.visible {
+    display:flex;
+}
+
+#image-preview img {
+    max-width:100%;
+    max-height:calc(100% - 28px);
+    object-fit:contain;
+    border:1px solid #3d3d3d;
+    box-shadow:0 10px 28px rgba(0,0,0,.4);
+    background:#111;
+}
+
+#image-preview .image-caption {
+    color:#cecece;
+    font-size:12px;
+    text-align:center;
 }
 
 #statusbar {
@@ -249,6 +295,11 @@ body { display:flex; }
 .tree-item.selected {
     background:#094771;
     color:#ffffff;
+}
+
+.tree-item.multi-selected {
+    outline:1px solid #0e639c;
+    outline-offset:-1px;
 }
 
 .tree-caret {
@@ -399,6 +450,7 @@ body { display:flex; }
         <button class="icon-btn" id="toggle-explorer-btn" onclick="toggleExplorer()" title="Toggle Explorer" aria-label="Toggle Explorer"></button>
         <button class="icon-btn" id="new-file-btn" onclick="createItem('file')" title="New File" aria-label="New File"></button>
         <button class="icon-btn" id="new-folder-btn" onclick="createItem('folder')" title="New Folder" aria-label="New Folder"></button>
+        <button class="icon-btn" id="download-btn" onclick="downloadSelectedFromExplorer()" title="Download Selected" aria-label="Download Selected"></button>
         <button class="icon-btn" id="logout-btn" onclick="logout()" title="Logout" aria-label="Logout">⎋</button>
     </div>
     <input id="search" placeholder="Search files...">
@@ -409,7 +461,13 @@ body { display:flex; }
 
 <div id="main">
     <div id="tabs"></div>
-    <div id="editor"></div>
+    <div id="editor-container">
+        <div id="editor"></div>
+        <div id="image-preview">
+            <img id="image-preview-img" alt="Image preview">
+            <div id="image-preview-caption" class="image-caption"></div>
+        </div>
+    </div>
     <div id="statusbar">Ready</div>
 </div>
 
@@ -440,6 +498,8 @@ let compareModifiedPath = null;
 let compareReturnPath = null;
 let compareReadOnlyModels = {};
 let selectedTreePath = null;
+let selectedTreePaths = new Set();
+let lastSelectedTreePath = null;
 let menuTarget = null;
 let closedTabs = [];
 let recentFiles = [];
@@ -460,6 +520,7 @@ let paletteMode = "commands";
 let paletteEntries = [];
 let paletteFilteredEntries = [];
 let paletteHighlightIndex = 0;
+let imageFiles = {};
 
 const MAX_RECENT = 12;
 const STORAGE_KEY = "ide_recentFiles";
@@ -522,6 +583,8 @@ function createIcon(name){
         addPath("M2 3h4l2 2h6v8H2V3zm6 3v2h2v1H8v2H7v-2H5v-1h2V6h1z");
     } else if(name === "sidebar"){
         addPath("M2 2h12v12H2V2zm1 1v10h3V3H3zm4 0v10h6V3H7z");
+    } else if(name === "download"){
+        addPath("M3 11h10v2H3v-2zm5-9h1v5.6l2.1-2.1.7.7L8.5 9.5 5.2 6.2l.7-.7L8 7.6V2z");
     } else if(name === "chevronRight"){
         addPath("M5.5 3L10 8l-4.5 5V10zm3 5l-3-4.5v9L8.5 8z");
     } else if(name === "chevronDown"){
@@ -540,9 +603,11 @@ function initToolbarIcons(){
     const toggleExplorerButton = document.getElementById("toggle-explorer-btn");
     const newFile = document.getElementById("new-file-btn");
     const newFolder = document.getElementById("new-folder-btn");
+    const downloadButton = document.getElementById("download-btn");
     if(toggleExplorerButton) setIcon(toggleExplorerButton, "sidebar");
     if(newFile) setIcon(newFile, "filePlus");
     if(newFolder) setIcon(newFolder, "folderPlus");
+    if(downloadButton) setIcon(downloadButton, "download");
 }
 
 function initContextMenu(){
@@ -575,8 +640,8 @@ async function resolveModelForCompare(path){
         });
         
         const model = monaco.editor.createModel(
-            data.content,
-            detectLanguage(path)
+            data.isImage ? buildImagePreviewPlaceholder(path) : data.content,
+            data.isImage ? "plaintext" : detectLanguage(path)
         );
         compareReadOnlyModels[path] = model;
         return { model: model, isReadOnly: true };
@@ -617,10 +682,10 @@ function exitCompareMode(){
 
     currentFile = returnPath && models[returnPath] ? returnPath : null;
     if(currentFile && models[currentFile]){
-        editor.setModel(models[currentFile]);
-        updateStatus();
+        setActive(currentFile);
     } else {
         editor.setModel(null);
+        hideImagePreview();
         setStatus(READY_STATUS);
     }
 }
@@ -629,6 +694,8 @@ async function startCompare(originalPath, modifiedPath){
     try {
         originalPath = normalizePath(originalPath);
         modifiedPath = normalizePath(modifiedPath);
+
+        hideImagePreview();
 
         const origData = await resolveModelForCompare(originalPath);
         const modData = await resolveModelForCompare(modifiedPath);
@@ -665,6 +732,8 @@ async function startCompare(originalPath, modifiedPath){
 
 async function startCompareWithContent(path, originalContent, originalLabel="Disk"){
     path = normalizePath(path);
+
+    hideImagePreview();
 
     if(!models[path]){
         setStatus(`Compare failed: ${basename(path)} is not open`, true);
@@ -744,6 +813,7 @@ function buildCommandRegistry(){
             }
         },
         saveFile: async ()=> save(),
+        downloadSelected: async ()=> downloadSelectedFromExplorer(),
         saveAll: async ()=> {
             const activePath = currentFile;
             for(const path of Object.keys(models)){
@@ -812,6 +882,7 @@ function buildCommandRegistry(){
         { id: "newFile", label: "New File", action: baseActions.newFile, keys: "" },
         { id: "newFolder", label: "New Folder", action: baseActions.newFolder, keys: "" },
         { id: "saveFile", label: "Save File", action: baseActions.saveFile, keys: "Ctrl+S" },
+        { id: "downloadSelected", label: "Download Selected", action: baseActions.downloadSelected, keys: "" },
         { id: "saveAll", label: "Save All", action: baseActions.saveAll, keys: "Ctrl+Shift+S" },
         { id: "reopenClosedTab", label: "Reopen Closed Tab", action: baseActions.reopenClosedTab, keys: "Ctrl+Shift+T" },
         { id: "openRecent", label: "Open Recent File", action: baseActions.openRecent, keys: "" },
@@ -1044,6 +1115,7 @@ function clearFileState(path){
     delete remoteFileSnapshots[path];
     delete conflictFiles[path];
     delete suppressModelChanges[path];
+    delete imageFiles[path];
 }
 
 function withSuppressedModelChanges(path, callback){
@@ -1115,11 +1187,86 @@ function normalizePath(path){
     return String(path || "").replace(/\\/g, '/');
 }
 
-function setTreeSelection(path){
-    selectedTreePath = normalizePath(path);
+function formatBytes(bytes){
+    if(typeof bytes !== "number" || Number.isNaN(bytes) || bytes < 0) return "";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let value = bytes;
+    let unitIndex = 0;
+    while(value >= 1024 && unitIndex < units.length - 1){
+        value /= 1024;
+        unitIndex += 1;
+    }
+    const rounded = value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1);
+    return `${rounded} ${units[unitIndex]}`;
+}
+
+function isImageFile(path){
+    return !!imageFiles[normalizePath(path)];
+}
+
+function buildImagePreviewPlaceholder(path){
+    return [
+        `Image preview: ${basename(path)}`,
+        "",
+        "This file is shown in preview mode and is not editable in the text editor."
+    ].join("\n");
+}
+
+function updateTreeSelectionStyles(){
     document.querySelectorAll(".tree-item").forEach((el)=>{
-        el.classList.toggle("selected", normalizePath(el.dataset.path) === selectedTreePath);
+        const path = normalizePath(el.dataset.path);
+        const isSelected = selectedTreePaths.has(path);
+        el.classList.toggle("selected", isSelected);
+        el.classList.toggle("multi-selected", isSelected && path !== selectedTreePath);
     });
+}
+
+function clearTreeSelection(){
+    selectedTreePath = null;
+    lastSelectedTreePath = null;
+    selectedTreePaths.clear();
+    updateTreeSelectionStyles();
+}
+
+function getSelectedTreePaths(targetPath=""){
+    const normalizedTarget = normalizePath(targetPath);
+    if(selectedTreePaths.size){
+        if(normalizedTarget && !selectedTreePaths.has(normalizedTarget)){
+            return [normalizedTarget];
+        }
+        return Array.from(selectedTreePaths);
+    }
+
+    if(normalizedTarget) return [normalizedTarget];
+    return selectedTreePath ? [selectedTreePath] : [];
+}
+
+function setTreeSelection(path, options={}){
+    const normalizedPath = normalizePath(path);
+    if(!normalizedPath){
+        clearTreeSelection();
+        return;
+    }
+
+    const additive = !!options.additive;
+    if(additive){
+        if(selectedTreePaths.has(normalizedPath)){
+            selectedTreePaths.delete(normalizedPath);
+            if(!selectedTreePaths.size){
+                clearTreeSelection();
+                return;
+            }
+        } else {
+            selectedTreePaths.add(normalizedPath);
+        }
+    } else {
+        selectedTreePaths.clear();
+        selectedTreePaths.add(normalizedPath);
+    }
+
+    selectedTreePath = normalizedPath;
+    lastSelectedTreePath = normalizedPath;
+    updateTreeSelectionStyles();
 }
 
 function cancelInlineEdit(){
@@ -1271,10 +1418,213 @@ function hideContextMenu(){
     menuTarget = null;
 }
 
+function getDownloadUrl(path){
+    return `/download?path=${encodeURIComponent(normalizePath(path))}`;
+}
+
+function getDownloadFilename(contentDisposition, fallbackName){
+    if(!contentDisposition) return fallbackName;
+    const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+    if(utf8Match?.[1]){
+        try {
+            return decodeURIComponent(utf8Match[1].trim());
+        } catch {
+            return utf8Match[1].trim();
+        }
+    }
+
+    const simpleMatch = contentDisposition.match(/filename="?([^";]+)"?/i);
+    return simpleMatch?.[1]?.trim() || fallbackName;
+}
+
+function toUniquePaths(paths){
+    return Array.from(new Set((paths || []).map((path)=>normalizePath(path)).filter(Boolean)));
+}
+
+function pruneNestedPaths(paths){
+    const ordered = toUniquePaths(paths).sort((left, right)=> left.length - right.length);
+    const result = [];
+
+    for(const path of ordered){
+        const isNested = result.some((parent)=> path === parent || path.startsWith(`${parent}/`));
+        if(!isNested) result.push(path);
+    }
+
+    return result;
+}
+
+function downloadPath(path){
+    const normalizedPath = normalizePath(path);
+    if(!normalizedPath){
+        setStatus("Invalid path", true);
+        return;
+    }
+
+    const link = document.createElement("a");
+    link.href = getDownloadUrl(normalizedPath);
+    link.download = "";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    setStatus(`Downloading ${basename(normalizedPath)}...`);
+}
+
+async function downloadSelectedPaths(paths){
+    const normalizedPaths = toUniquePaths(paths);
+    if(!normalizedPaths.length){
+        setStatus("No items selected", true);
+        return;
+    }
+
+    if(normalizedPaths.length === 1){
+        downloadPath(normalizedPaths[0]);
+        return;
+    }
+
+    try {
+        const response = await fetch("/download-selected", {
+            method:"POST",
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({ paths: normalizedPaths })
+        });
+
+        if(response.status === 401){
+            window.location.href = "/login";
+            return;
+        }
+
+        if(!response.ok){
+            let payload = {};
+            try {
+                payload = await response.json();
+            } catch {
+                payload = {};
+            }
+            throw new Error(payload.error || `Request failed (${response.status})`);
+        }
+
+        const fileBlob = await response.blob();
+        const filename = getDownloadFilename(
+            response.headers.get("Content-Disposition") || "",
+            "selected-items.zip"
+        );
+
+        const blobUrl = URL.createObjectURL(fileBlob);
+        const link = document.createElement("a");
+        link.href = blobUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(blobUrl);
+
+        setStatus(`Downloading ${normalizedPaths.length} selected items...`);
+    } catch (error) {
+        setStatus(`Download failed: ${error.message}`, true);
+    }
+}
+
+async function downloadSelectedFromExplorer(){
+    const selected = getSelectedTreePaths();
+    if(!selected.length){
+        setStatus("Select one or more files or folders first", true);
+        return;
+    }
+    await downloadSelectedPaths(selected);
+}
+
+async function deleteSelectedPaths(paths){
+    const targets = pruneNestedPaths(paths);
+    if(!targets.length) return;
+
+    if(targets.length === 1){
+        await deletePath(targets[0]);
+        return;
+    }
+
+    const confirmed = confirm(`Delete ${targets.length} selected items?`);
+    if(!confirmed) return;
+
+    try {
+        for(const target of targets){
+            const data = await requestJson("/delete", {
+                method:"POST",
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({ path: normalizePath(target) })
+            });
+            if(typeof data.treeVersion === "string"){
+                treeVersion = data.treeVersion;
+            }
+
+            const targetPrefix = `${target}/`;
+            const affectedTabs = Object.keys(models).filter((key)=> key === target || key.startsWith(targetPrefix));
+            for(const tabPath of affectedTabs){
+                closeTab(tabPath, true);
+            }
+        }
+
+        if(compareMode){
+            const comparePaths = [compareOriginalPath, compareModifiedPath].map((path)=> normalizePath(path));
+            if(targets.some((target)=> comparePaths.some((comparePath)=> comparePath === target || comparePath.startsWith(`${target}/`)))){
+                exitCompareMode();
+            }
+        }
+
+        await loadTree();
+        clearTreeSelection();
+    } catch (error) {
+        setStatus(`Delete failed: ${error.message}`, true);
+    }
+}
+
+function showImagePreview(path){
+    const preview = document.getElementById("image-preview");
+    const image = document.getElementById("image-preview-img");
+    const caption = document.getElementById("image-preview-caption");
+    const editorContainer = document.getElementById("editor");
+
+    const cacheKey = fileMetadata[path]?.version || Date.now().toString();
+    image.src = `/raw?path=${encodeURIComponent(path)}&v=${encodeURIComponent(cacheKey)}`;
+    image.onerror = ()=>{
+        setStatus(`Preview failed: ${basename(path)}`, true);
+    };
+
+    const sizeText = formatBytes(fileMetadata[path]?.size);
+    caption.textContent = sizeText ? `${path} | ${sizeText}` : path;
+    preview.classList.add("visible");
+    editorContainer.style.display = "none";
+}
+
+function hideImagePreview(){
+    const preview = document.getElementById("image-preview");
+    const image = document.getElementById("image-preview-img");
+    const editorContainer = document.getElementById("editor");
+
+    preview.classList.remove("visible");
+    image.removeAttribute("src");
+    editorContainer.style.display = "block";
+}
+
 function getContextActions(target){
+    const targetPath = normalizePath(target.path || "");
+    const selectedPaths = getSelectedTreePaths(targetPath);
+    const multiSelection = selectedPaths.length > 1;
+
     if(target.type === "file"){
-        return [
+        const actions = [
             { label: "Open", action: ()=>openFile(target.path) },
+            { label: "Download File", action: ()=>downloadPath(targetPath) },
+        ];
+
+        if(multiSelection){
+            actions.push({
+                label: `Download Selected (${selectedPaths.length})`,
+                action: ()=>downloadSelectedPaths(selectedPaths)
+            });
+        }
+
+        actions.push(
             { type: "separator" },
             { label: "Select for Compare", action: ()=>{
                 compareCandidatePath = normalizePath(target.path);
@@ -1290,27 +1640,56 @@ function getContextActions(target){
                 await startCompare(compareCandidatePath, target.path);
             }},
             { type: "separator" },
-            { label: "Rename", action: ()=>startInlineEdit(target.path, "rename") },
-            { label: "Delete", action: ()=>deletePath(target.path) }
-        ];
+        );
+
+        if(!multiSelection){
+            actions.push({ label: "Rename", action: ()=>startInlineEdit(target.path, "rename") });
+            actions.push({ label: "Delete", action: ()=>deletePath(target.path) });
+        } else {
+            actions.push({ label: `Delete Selected (${selectedPaths.length})`, action: ()=>deleteSelectedPaths(selectedPaths) });
+        }
+
+        return actions;
     }
 
     if(target.type === "folder"){
-        return [
+        const actions = [
             { label: "New File", action: ()=>startInlineEdit(target.path, "file") },
             { label: "New Folder", action: ()=>startInlineEdit(target.path, "folder") },
             { type: "separator" },
-            { label: "Rename", action: ()=>startInlineEdit(target.path, "rename") },
-            { label: "Delete", action: ()=>deletePath(target.path) }
+            { label: "Download Folder", action: ()=>downloadPath(targetPath) },
         ];
+
+        if(multiSelection){
+            actions.push({ label: `Download Selected (${selectedPaths.length})`, action: ()=>downloadSelectedPaths(selectedPaths) });
+        }
+
+        actions.push({ type: "separator" });
+        if(!multiSelection){
+            actions.push({ label: "Rename", action: ()=>startInlineEdit(target.path, "rename") });
+            actions.push({ label: "Delete", action: ()=>deletePath(target.path) });
+        } else {
+            actions.push({ label: `Delete Selected (${selectedPaths.length})`, action: ()=>deleteSelectedPaths(selectedPaths) });
+        }
+
+        return actions;
     }
 
-    return [
+    const actions = [
         { label: "New File", action: ()=>startInlineEdit("", "file") },
         { label: "New Folder", action: ()=>startInlineEdit("", "folder") },
         { type: "separator" },
         { label: "Refresh Explorer", action: ()=>loadTree() }
     ];
+
+    if(selectedTreePaths.size){
+        actions.splice(3, 0, {
+            label: `Download Selected (${selectedTreePaths.size})`,
+            action: ()=>downloadSelectedPaths(Array.from(selectedTreePaths))
+        });
+    }
+
+    return actions;
 }
 
 function openContextMenu(x, y, target){
@@ -1394,6 +1773,25 @@ function detectLanguage(file){
     return map[ext] || "plaintext";
 }
 
+function bindModelChangeListener(path){
+    if(modelListeners[path]){
+        modelListeners[path].dispose();
+        delete modelListeners[path];
+    }
+
+    if(!models[path] || isImageFile(path)) return;
+
+    modelListeners[path] = models[path].onDidChangeContent(()=>{
+        if(suppressModelChanges[path]) return;
+        dirtyFiles[path] = true;
+        updateTabState(path);
+        scheduleAutoSave(path);
+        if(path === currentFile){
+            updateStatus();
+        }
+    });
+}
+
 function scheduleAutoSave(path){
     path = normalizePath(path);
     clearAutoSaveTimer(path);
@@ -1416,10 +1814,49 @@ async function reloadFileFromDisk(path, reason="updated"){
         body:JSON.stringify({path})
     });
 
+    const nextIsImage = !!data.isImage;
+    const previousIsImage = isImageFile(path);
+
+    if(nextIsImage){
+        imageFiles[path] = true;
+    } else {
+        delete imageFiles[path];
+    }
+
+    if(previousIsImage !== nextIsImage){
+        if(modelListeners[path]){
+            modelListeners[path].dispose();
+            delete modelListeners[path];
+        }
+
+        if(models[path]){
+            models[path].dispose();
+        }
+
+        models[path] = monaco.editor.createModel(
+            nextIsImage ? buildImagePreviewPlaceholder(path) : data.content,
+            nextIsImage ? "plaintext" : detectLanguage(path)
+        );
+        bindModelChangeListener(path);
+        dirtyFiles[path] = false;
+    } else {
+        setModelContent(path, nextIsImage ? buildImagePreviewPlaceholder(path) : data.content, { markDirty: false });
+    }
+
     trackFileMeta(path, data.meta);
     delete remoteFileSnapshots[path];
     delete conflictFiles[path];
-    setModelContent(path, data.content, { markDirty: false });
+
+    if(path === currentFile && !compareMode){
+        if(nextIsImage){
+            editor.updateOptions({ readOnly: true });
+            showImagePreview(path);
+        } else {
+            editor.updateOptions({ readOnly: false });
+            hideImagePreview();
+            editor.setModel(models[path]);
+        }
+    }
 
     if(path === currentFile){
         setStatus(`Reloaded ${basename(path)} from disk (${reason})`);
@@ -1562,9 +1999,15 @@ async function loadTree(){
             treeVersion = data.treeVersion;
         }
 
-        if(selectedTreePath){
-            setTreeSelection(selectedTreePath);
+        const availablePaths = new Set(
+            Array.from(document.querySelectorAll(".tree-item")).map((element)=> normalizePath(element.dataset.path))
+        );
+        selectedTreePaths = new Set(Array.from(selectedTreePaths).filter((path)=> availablePaths.has(path)));
+        if(selectedTreePath && !selectedTreePaths.has(selectedTreePath)){
+            selectedTreePath = selectedTreePaths.size ? Array.from(selectedTreePaths)[0] : null;
         }
+
+        updateTreeSelectionStyles();
     } catch (error) {
         setStatus(`Tree error: ${error.message}`, true);
     }
@@ -1606,8 +2049,12 @@ function buildTree(nodes){
             childrenContainer.style.marginLeft = "8px";
             childrenContainer.appendChild(buildTree(n.children || []));
 
-            node.onclick = function(){
-                setTreeSelection(this.dataset.path);
+            node.onclick = function(event){
+                const path = this.dataset.path;
+                const additive = event.ctrlKey || event.metaKey;
+                setTreeSelection(path, { additive });
+                if(additive) return;
+
                 const isClosed = this.classList.contains("closed");
                 this.classList.toggle("closed");
                 childrenContainer.style.display = isClosed ? "block" : "none";
@@ -1616,27 +2063,36 @@ function buildTree(nodes){
 
             node.oncontextmenu = function(event){
                 event.preventDefault();
-                setTreeSelection(this.dataset.path);
+                const path = this.dataset.path;
+                if(!selectedTreePaths.has(path)){
+                    setTreeSelection(path);
+                }
                 openContextMenu(event.clientX, event.clientY, {
                     type: "folder",
-                    path: this.dataset.path
+                    path
                 });
             };
 
             item.appendChild(node);
             item.appendChild(childrenContainer);
         } else {
-            node.onclick = function(){
-                setTreeSelection(this.dataset.path);
-                openFile(this.dataset.path);
+            node.onclick = function(event){
+                const path = this.dataset.path;
+                const additive = event.ctrlKey || event.metaKey;
+                setTreeSelection(path, { additive });
+                if(additive) return;
+                openFile(path);
             };
 
             node.oncontextmenu = function(event){
                 event.preventDefault();
-                setTreeSelection(this.dataset.path);
+                const path = this.dataset.path;
+                if(!selectedTreePaths.has(path)){
+                    setTreeSelection(path);
+                }
                 openContextMenu(event.clientX, event.clientY, {
                     type: "file",
-                    path: this.dataset.path
+                    path
                 });
             };
 
@@ -1664,24 +2120,23 @@ async function openFile(path){
             body:JSON.stringify({path})
         });
 
+        const isImage = !!data.isImage;
+        if(isImage){
+            imageFiles[path] = true;
+        } else {
+            delete imageFiles[path];
+        }
+
         models[path] = monaco.editor.createModel(
-            data.content,
-            detectLanguage(path)
+            isImage ? buildImagePreviewPlaceholder(path) : data.content,
+            isImage ? "plaintext" : detectLanguage(path)
         );
 
         trackFileMeta(path, data.meta);
         delete conflictFiles[path];
         delete remoteFileSnapshots[path];
 
-        modelListeners[path] = models[path].onDidChangeContent(()=>{
-            if(suppressModelChanges[path]) return;
-            dirtyFiles[path] = true;
-            updateTabState(path);
-            scheduleAutoSave(path);
-            if(path === currentFile){
-                updateStatus();
-            }
-        });
+        bindModelChangeListener(path);
 
         dirtyFiles[path] = false;
         createTab(path);
@@ -1739,6 +2194,13 @@ function setActive(path){
 
     currentFile = path;
     editor.setModel(models[path]);
+    if(isImageFile(path)){
+        editor.updateOptions({ readOnly: true });
+        showImagePreview(path);
+    } else {
+        hideImagePreview();
+        editor.updateOptions({ readOnly: false });
+    }
     setTreeSelection(path);
 
     document.querySelectorAll(".tab").forEach(t=>{
@@ -1767,6 +2229,7 @@ function closeTab(path, force=false){
     delete models[path];
     delete dirtyFiles[path];
     delete pinnedTabs[path];
+    delete imageFiles[path];
 
     const tab = getTabElement(path);
     if(tab) tab.remove();
@@ -1787,6 +2250,7 @@ function closeTab(path, force=false){
         } else {
             if(compareMode) exitCompareMode();
             editor.setModel(null);
+            hideImagePreview();
             currentFile = null;
             setStatus(READY_STATUS);
         }
@@ -1823,6 +2287,12 @@ async function save(path=currentFile, options={}){
     path = normalizePath(path);
     if(!path || compareMode) return false;
     if(!models[path] || saveInFlight[path]) return false;
+    if(isImageFile(path)){
+        if(path === currentFile){
+            setStatus("Image previews are read-only in the editor", true);
+        }
+        return false;
+    }
 
     const reason = options.reason || "manual";
     const force = !!options.force;
@@ -1927,6 +2397,13 @@ function updateStatus(){
         return;
     }
 
+    if(isImageFile(currentFile)){
+        const sizeText = formatBytes(fileMetadata[currentFile]?.size);
+        const sizeSuffix = sizeText ? ` | ${sizeText}` : "";
+        setStatus(`${currentFile} (Image Preview)${sizeSuffix}`);
+        return;
+    }
+
     const position = editor ? editor.getPosition() : null;
     let stateLabel = "";
 
@@ -1968,6 +2445,11 @@ function syncRenamedFileInTabs(oldPath, newPath){
         if(fileMetadata[sourcePath]){
             fileMetadata[targetPath] = fileMetadata[sourcePath];
             delete fileMetadata[sourcePath];
+        }
+
+        if(imageFiles[sourcePath]){
+            imageFiles[targetPath] = imageFiles[sourcePath];
+            delete imageFiles[sourcePath];
         }
 
         if(remoteFileSnapshots[sourcePath] !== undefined){
@@ -2106,7 +2588,7 @@ async function deletePath(path){
         }
 
         await loadTree();
-        selectedTreePath = null;
+        clearTreeSelection();
     } catch (error) {
         setStatus(`Delete failed: ${error.message}`, true);
     }
@@ -2154,9 +2636,10 @@ document.addEventListener("keydown", (event)=>{
             commandRegistry.actions.redo();
         }
     } else if(event.key === "Delete" && !pendingInlineEdit){
-        if(selectedTreePath){
+        const selectedPaths = getSelectedTreePaths();
+        if(selectedPaths.length){
             event.preventDefault();
-            deletePath(selectedTreePath);
+            deleteSelectedPaths(selectedPaths);
         }
     }
 });

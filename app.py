@@ -3,8 +3,11 @@ import shutil
 import argparse
 import hashlib
 import sys
+import io
+import mimetypes
+import zipfile
 from urllib.parse import urlparse
-from flask import Flask, render_template, request, jsonify, redirect, session, url_for
+from flask import Flask, render_template, request, jsonify, redirect, session, url_for, send_file
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash
 
@@ -39,7 +42,21 @@ BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 ROOT_DIR = os.getenv("ROOT_DIR") or BASE_DIR
 ROOT_DIR = os.path.abspath(os.path.normpath(ROOT_DIR))
 
-API_PATHS = {"/tree", "/open", "/save", "/create", "/rename", "/delete", "/watch"}
+API_PATHS = {"/tree", "/open", "/save", "/create", "/rename", "/delete", "/watch", "/download-selected"}
+
+IMAGE_EXTENSIONS = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".bmp",
+    ".webp",
+    ".svg",
+    ".ico",
+    ".tif",
+    ".tiff",
+    ".avif",
+}
 
 
 def is_api_request():
@@ -147,6 +164,15 @@ def read_text_file(path):
         return file_handle.read()
 
 
+def is_image_path(path):
+    extension = os.path.splitext(path)[1].lower()
+    if extension in IMAGE_EXTENSIONS:
+        return True
+
+    guessed_type, _ = mimetypes.guess_type(path)
+    return bool(guessed_type and guessed_type.startswith("image/"))
+
+
 def build_file_meta(path):
     if not os.path.isfile(path):
         return None
@@ -178,10 +204,53 @@ def build_tree_version():
 
 
 def build_open_file_response(path):
+    image_file = is_image_path(path)
     return {
-        "content": read_text_file(path),
+        "content": "" if image_file else read_text_file(path),
+        "isImage": image_file,
         "meta": build_file_meta(path),
     }
+
+
+def create_zip_from_sources(paths):
+    zip_buffer = io.BytesIO()
+    seen_entries = set()
+
+    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for source in paths:
+            if os.path.isfile(source):
+                rel_path = os.path.relpath(source, ROOT_DIR).replace("\\", "/")
+                if rel_path in seen_entries:
+                    continue
+                archive.write(source, arcname=rel_path)
+                seen_entries.add(rel_path)
+                continue
+
+            if os.path.isdir(source):
+                for current_root, dirnames, filenames in os.walk(source):
+                    dirnames.sort()
+                    filenames.sort()
+
+                    rel_dir = os.path.relpath(current_root, ROOT_DIR).replace("\\", "/")
+                    if not dirnames and not filenames:
+                        dir_entry = f"{rel_dir}/"
+                        if dir_entry not in seen_entries:
+                            archive.writestr(dir_entry, "")
+                            seen_entries.add(dir_entry)
+
+                    for filename in filenames:
+                        file_path = os.path.join(current_root, filename)
+                        rel_path = os.path.relpath(file_path, ROOT_DIR).replace("\\", "/")
+                        if rel_path in seen_entries:
+                            continue
+                        archive.write(file_path, arcname=rel_path)
+                        seen_entries.add(rel_path)
+                continue
+
+            raise FileNotFoundError("Path not found")
+
+    zip_buffer.seek(0)
+    return zip_buffer
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -316,6 +385,76 @@ def watch_files():
         "treeVersion": tree_version,
         "treeChanged": known_tree_version != tree_version,
     })
+
+@app.route("/download")
+def download_path():
+    rel_path = request.args.get("path", "")
+    path = safe_path(rel_path)
+
+    if not os.path.exists(path):
+        raise FileNotFoundError("Path not found")
+
+    if os.path.isfile(path):
+        guessed_type, _ = mimetypes.guess_type(path)
+        return send_file(
+            path,
+            mimetype=guessed_type or "application/octet-stream",
+            as_attachment=True,
+            download_name=os.path.basename(path),
+        )
+
+    if os.path.isdir(path):
+        zip_buffer = create_zip_from_sources([path])
+        folder_name = os.path.basename(path.rstrip(os.sep)) or "folder"
+        return send_file(
+            zip_buffer,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=f"{folder_name}.zip",
+        )
+
+    raise FileNotFoundError("Path not found")
+
+@app.route("/download-selected", methods=["POST"])
+def download_selected():
+    payload = get_json_payload()
+    paths = payload.get("paths")
+
+    if not isinstance(paths, list) or not paths:
+        raise ValueError("'paths' must be a non-empty array")
+
+    resolved_paths = []
+    for item in paths:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("Each path must be a non-empty string")
+        safe_item = safe_path(item)
+        if not os.path.exists(safe_item):
+            raise FileNotFoundError("Path not found")
+        resolved_paths.append(safe_item)
+
+    zip_buffer = create_zip_from_sources(resolved_paths)
+    return send_file(
+        zip_buffer,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name="selected-items.zip",
+    )
+
+@app.route("/raw")
+def raw_file():
+    rel_path = request.args.get("path", "")
+    path = safe_path(rel_path)
+
+    if not os.path.isfile(path):
+        raise FileNotFoundError("File not found")
+
+    guessed_type, _ = mimetypes.guess_type(path)
+    return send_file(
+        path,
+        mimetype=guessed_type or "application/octet-stream",
+        conditional=True,
+        max_age=0,
+    )
 
 @app.route("/create", methods=["POST"])
 def create():

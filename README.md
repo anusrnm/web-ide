@@ -158,6 +158,30 @@ Then open `http://localhost:5000` and sign in with your shared password.
 
 To run Web IDE automatically at boot, use `systemd` for robust service management:
 
+### Quick setup script
+
+You can generate and install the unit file with:
+
+```bash
+chmod +x scripts/setup_systemd_service.sh
+sudo bash scripts/setup_systemd_service.sh
+```
+
+What it does:
+
+- Prompts for project path, service user, python path, host/port, `ROOT_DIR`, and required secrets.
+- Writes `/etc/systemd/system/<service>.service`.
+- Writes `/etc/<service>.env` with app environment values.
+- Runs `systemctl daemon-reload`.
+- Enables and starts the service.
+
+The script requires these values during prompts:
+
+- `WEBIDE_PASSWORD_HASH`
+- `SECRET_KEY`
+
+### Manual setup
+
 1. Create a unit file `/etc/systemd/system/webide.service`:
 	```ini
 	[Unit]
